@@ -370,8 +370,8 @@ pub struct Config {
     /// Start automatically with Windows (HKCU Run key).
     #[serde(default)]
     pub autostart: bool,
-    /// Auto-show the on-screen virtual keyboard when a text caret is detected.
-    #[serde(default)]
+    /// Auto-show the on-screen virtual keyboard when a text field/search box is clicked.
+    #[serde(default = "d_true")]
     pub vk_auto_show: bool,
     /// File stem of the profile to activate at startup. Empty = built-in
     /// default bindings from `Config::bindings`.
@@ -409,7 +409,7 @@ impl Default for Config {
             enabled: true,
             disable_in_fullscreen: false,
             autostart: false,
-            vk_auto_show: false,
+            vk_auto_show: true,
             active_profile: String::new(),
             auto_profile_switch: true,
             toggle_hotkey: d_default_hotkey(),
@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(back.controller.left_stick_dead_zone, 7849);
         assert_eq!(back.bindings.len(), cfg.bindings.len());
         assert!(back.enabled);
-        assert!(!back.vk_auto_show);
+        assert!(back.vk_auto_show);
     }
 
     #[test]

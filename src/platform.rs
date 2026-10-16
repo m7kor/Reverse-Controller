@@ -420,6 +420,7 @@ fn point_is_text_field(pt: POINT) -> bool {
                 let c = String::from_utf16_lossy(&buf[..len as usize]);
                 if c == "Shell_TrayWnd"
                     || c == "Shell_SecondaryTrayWnd"
+                    || c == "TopLevelWindowForOverflowXamlIsland"
                     || c == "TaskListThumbnailWnd"
                     || c == "Progman"
                     || c == "WorkerW"
@@ -454,8 +455,13 @@ fn point_is_text_field(pt: POINT) -> bool {
         return true;
     }
 
-    // 4. A real caret on the foreground thread.
-    caret_active()
+    // 4. A real caret on the foreground thread or I-Beam cursor.
+    if caret_active() || is_cursor_ibeam() {
+        return true;
+    }
+
+    // 5. Query MSAA to catch modern WinUI/XAML (Settings search, Start Menu search), Chrome, Discord, etc.
+    check_accessible_text(pt)
 }
 
 /// Is the currently focused window sitting under the cursor?
@@ -729,6 +735,7 @@ pub fn is_fullscreen() -> bool {
                 || class_name == "Windows.UI.Core.CoreWindow"
                 || class_name == "ApplicationFrameWindow"
                 || class_name == "Xaml_WindowedPopupClass"
+                || class_name == "TopLevelWindowForOverflowXamlIsland"
                 || class_name.starts_with("Windows.UI.")
             {
                 return false;
