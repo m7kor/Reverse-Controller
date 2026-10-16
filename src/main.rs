@@ -74,6 +74,7 @@ fn main() {
     let mut demo_kb_ar = false;
     let mut open_standalone_settings = false;
     let mut trace_pad = false;
+    let mut no_elevate = false;
     let mut inject_pad: Option<(i16, i16, i16, i16, u16)> = None;
 
     let mut i = 0;
@@ -171,6 +172,7 @@ fn main() {
                 }
             }
             "--settings" => open_standalone_settings = true,
+            "--no-elevate" => no_elevate = true,
             "--elevate" => {
                 if !platform::is_elevated() {
                     println!("[main] Requesting administrator elevation via UAC...");
@@ -193,6 +195,15 @@ fn main() {
             other => eprintln!("[main] ignoring unknown arg: {other}"),
         }
         i += 1;
+    }
+
+    // Automatic Administrator elevation: if not elevated, relaunch elevated via UAC immediately!
+    let is_cli_helper = status_only || print_default || write_default;
+    if !elevated && !no_elevate && !is_cli_helper {
+        println!("[main] Elevating process to run as Administrator...");
+        if let Ok(()) = platform::relaunch_elevated(&args) {
+            return;
+        }
     }
 
     if open_standalone_settings {
@@ -257,10 +268,15 @@ fn main() {
     // Single-instance enforcement: prevent duplicate background instances
     let (mut instance_mutex, mut already_running) = win32::create_named_mutex("Local\\ControllerCompanionRust_InstanceLock");
     if already_running {
-        std::thread::sleep(std::time::Duration::from_millis(120));
-        let (m2, a2) = win32::create_named_mutex("Local\\ControllerCompanionRust_InstanceLock");
-        instance_mutex = m2;
-        already_running = a2;
+        for _ in 0..6 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let (m2, a2) = win32::create_named_mutex("Local\\ControllerCompanionRust_InstanceLock");
+            if !a2 {
+                instance_mutex = m2;
+                already_running = false;
+                break;
+            }
+        }
     }
     let _instance_mutex = instance_mutex;
     if already_running {
@@ -370,13 +386,10 @@ fn main() {
                     let enabled = eng2.lock().map(|e| e.config().vk_auto_show).unwrap_or(false);
                     if enabled {
                         // If user clicked outside with their physical mouse, dismiss the on-screen keyboard
-                        if platform::take_physical_mouse_click() {
-                            let was_vis = f2.load(Ordering::SeqCst);
-                            if was_vis {
-                                f2.store(false, Ordering::SeqCst);
-                                platform::set_window_visible("CCVKbd", false);
-                                vkeyboard::request_vkeyboard_repaint();
-                            }
+                        if f2.load(Ordering::Relaxed) && platform::is_physical_mouse_button_down() && !platform::last_click_within_ms(300) {
+                            f2.store(false, Ordering::SeqCst);
+                            platform::set_window_visible("CCVKbd", false);
+                            vkeyboard::request_vkeyboard_repaint();
                         }
 
                         let immediate = platform::take_text_click();

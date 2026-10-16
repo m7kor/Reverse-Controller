@@ -61,10 +61,17 @@ pub fn toggle_keyboard(flag: Option<Arc<AtomicBool>>) {
         let cur_mode = OVERLAY_MODE.load(Ordering::SeqCst);
         if cur_vis && cur_mode == 0 {
             f.store(false, Ordering::SeqCst);
+            platform::set_window_visible(WINDOW_TITLE, false);
+            platform::move_window(WINDOW_TITLE, -4000, -4000);
         } else {
             OVERLAY_MODE.store(0, Ordering::SeqCst);
             platform::push_foreground();
             f.store(true, Ordering::SeqCst);
+            let work = platform::work_area();
+            let origin = crate::config::KeyboardPrefs::default().anchor(work, None);
+            let base_w = (crate::config::KB_BASE_W).round() as i32;
+            let base_h = (crate::config::KB_BASE_H).round() as i32;
+            platform::place_window(WINDOW_TITLE, origin.0, origin.1, base_w, base_h);
             platform::set_window_visible(WINDOW_TITLE, true);
         }
         request_vkeyboard_repaint();
@@ -78,10 +85,19 @@ pub fn toggle_radial_menu(flag: Option<Arc<AtomicBool>>) {
         let cur_mode = OVERLAY_MODE.load(Ordering::SeqCst);
         if cur_vis && cur_mode == 1 {
             f.store(false, Ordering::SeqCst);
+            platform::set_window_visible(WINDOW_TITLE, false);
+            platform::move_window(WINDOW_TITLE, -4000, -4000);
         } else {
             OVERLAY_MODE.store(1, Ordering::SeqCst);
             platform::push_foreground();
             f.store(true, Ordering::SeqCst);
+            let (wx, wy, ww, wh) = platform::work_area();
+            let want = (430.0f32, 430.0f32);
+            let origin = (
+                (wx as f32 + (ww as f32 - want.0) / 2.0).round() as i32,
+                (wy as f32 + (wh as f32 - want.1) / 2.0).round() as i32,
+            );
+            platform::place_window(WINDOW_TITLE, origin.0, origin.1, want.0 as i32, want.1 as i32);
             platform::set_window_visible(WINDOW_TITLE, true);
         }
         request_vkeyboard_repaint();

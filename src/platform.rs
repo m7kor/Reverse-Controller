@@ -76,6 +76,7 @@ pub const MOD_CONTROL: u32 = 1 << 1;
 pub const MOD_MENU: u32 = 1 << 2;
 pub const MOD_WIN: u32 = 1 << 3;
 
+pub const VK_LBUTTON: u32 = 0x01;
 pub const VK_SHIFT: u32 = 0x10;
 pub const VK_CONTROL: u32 = 0x11;
 pub const VK_MENU: u32 = 0x12;
@@ -164,9 +165,6 @@ const EDIT_CLASSES: &[&str] = &[
     "Notepad",
     "NotepadEdit",
     "TextBox",
-    "Windows.UI.Input.InputSite",
-    "Microsoft.UI.Xaml",
-    "SearchBox",
     "Scintilla",
 ];
 
@@ -211,6 +209,27 @@ pub fn last_click_within_ms(ms: u64) -> bool {
 
 pub fn clear_last_click() {
     LAST_LCLICK_TIME.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Record a controller left-click natively in-process. Inspects text-box status
+/// immediately without any low-level OS mouse hooks.
+pub fn note_controller_left_click() {
+    let now_ms = (crate::steady_seconds() * 1000.0) as u64;
+    LAST_LCLICK_TIME.store(now_ms, std::sync::atomic::Ordering::SeqCst);
+    LAST_CLICK_WAS_CONTROLLER.store(true, std::sync::atomic::Ordering::SeqCst);
+    push_foreground();
+    unsafe {
+        let mut pt: POINT = std::mem::zeroed();
+        if GetCursorPos(&mut pt) != 0 {
+            if is_cursor_ibeam() || point_is_text_field(pt) {
+                CLICK_IN_TEXT.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+pub fn is_physical_mouse_button_down() -> bool {
+    unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 }
 }
 
 #[repr(C)]
@@ -323,45 +342,8 @@ pub fn check_accessible_text(pt: POINT) -> bool {
     }
 }
 
+#[allow(dead_code)]
 extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    use std::sync::atomic::Ordering;
-    let msg = wparam as i32;
-    if code == 0 && lparam != 0 {
-        unsafe {
-            let hs = &*(lparam as *const MSLLHOOKSTRUCT);
-            // Ignore any clicks that land on our own virtual keyboard overlay.
-            let under = WindowFromPoint(hs.pt);
-            let ov = overlay_hwnd() as HWND;
-            let on_overlay = !under.is_null() && !ov.is_null() && (under == ov || GetParent(under) == ov);
-            if !on_overlay && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) {
-                let is_injected = (hs.flags & 1) != 0;
-                let has_magic = hs.dw_extra_info == crate::win32::CONTROLLER_EXTRA_INFO;
-                let recent_ctrl = controller_used_within_ms(2500);
-                let is_controller = has_magic || (is_injected && recent_ctrl);
-
-                LAST_CLICK_WAS_CONTROLLER.store(is_controller, Ordering::SeqCst);
-
-                if is_controller {
-                    if msg == WM_LBUTTONDOWN {
-                        push_foreground();
-                    }
-                    let now_ms = (crate::steady_seconds() * 1000.0) as u64;
-                    LAST_LCLICK_TIME.store(now_ms, Ordering::SeqCst);
-                    if is_cursor_ibeam() || point_is_text_field(hs.pt) {
-                        CLICK_IN_TEXT.store(true, Ordering::SeqCst);
-                    }
-                } else {
-                    // Real physical mouse clicked!
-                    // Immediately clear text click flag so OSK never opens on physical mouse click!
-                    CLICK_IN_TEXT.store(false, Ordering::SeqCst);
-                    LAST_LCLICK_TIME.store(0, Ordering::SeqCst);
-                    if msg == WM_LBUTTONDOWN {
-                        PHYSICAL_MOUSE_CLICKED.store(true, Ordering::SeqCst);
-                    }
-                }
-            }
-        }
-    }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
@@ -427,18 +409,39 @@ fn point_is_text_field(pt: POINT) -> bool {
         if pid == std::process::id() {
             return false;
         }
+
+        // 1. If click lands inside Windows Taskbar or Desktop (or any of their child controls),
+        // it is selecting programs/files/windows, NOT entering text.
+        let mut cur = under;
+        while !cur.is_null() {
+            let mut buf = [0u16; 64];
+            let len = GetClassNameW(cur, buf.as_mut_ptr(), 64);
+            if len > 0 {
+                let c = String::from_utf16_lossy(&buf[..len as usize]);
+                if c == "Shell_TrayWnd"
+                    || c == "Shell_SecondaryTrayWnd"
+                    || c == "TaskListThumbnailWnd"
+                    || c == "Progman"
+                    || c == "WorkerW"
+                {
+                    return caret_active();
+                }
+            }
+            let parent = GetParent(cur);
+            if parent == cur {
+                break;
+            }
+            cur = parent;
+        }
     }
 
     let class = window_class_at(pt);
     let class_name = class.as_deref().unwrap_or("");
 
-    // 1. If click lands inside Desktop or Explorer file list, it's selecting files,
-    // NOT entering text (unless a real edit caret is active, e.g. renaming a file).
+    // 2. If click lands inside Explorer file list, it's selecting files.
     if class_name == "SysListView32"
         || class_name == "SHELLDLL_DefView"
         || class_name == "DirectUIHWND"
-        || class_name == "Progman"
-        || class_name == "WorkerW"
         || class_name == "CabinetWClass"
         || class_name == "ShellTabWindowClass"
         || class_name == "XamlExplorerHostIslandWindow"
@@ -446,21 +449,13 @@ fn point_is_text_field(pt: POINT) -> bool {
         return caret_active();
     }
 
-    // 2. Known native edit class.
+    // 3. Known native edit class.
     if EDIT_CLASSES.iter().any(|e| class_name.starts_with(e)) {
         return true;
     }
 
-    // 3. A real caret on the foreground thread.
-    if caret_active() {
-        return true;
-    }
-
-    // 4. Accessibility role check (catches modern apps: Discord, Chrome, WinUI, VS Code, Slack, Word)
-    if check_accessible_text(pt) {
-        return true;
-    }
-    false
+    // 4. A real caret on the foreground thread.
+    caret_active()
 }
 
 /// Is the currently focused window sitting under the cursor?
@@ -513,31 +508,10 @@ fn window_class_at(pt: POINT) -> Option<String> {
     }
 }
 
-/// Install a global low-level mouse hook that records left-clicks landing in
-/// text boxes. Returns the thread handle marker (the hook lives on this thread's
-/// message loop, which the tray thread already provides).
-pub fn mouse_watch_start() {
-    std::thread::spawn(|| unsafe {
-        attach_to_interactive_desktop();
-        let hook = SetWindowsHookExW(
-            WH_MOUSE_LL,
-            mouse_hook_proc as *const () as LRESULT,
-            std::ptr::null_mut(),
-            0,
-        );
-        if hook.is_null() {
-            log_debug("[mouse_watch] Failed to install WH_MOUSE_LL hook");
-            return;
-        }
-        log_debug("[mouse_watch] WH_MOUSE_LL hook successfully installed");
-        let mut msg = std::mem::zeroed::<MSG>();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        UnhookWindowsHookEx(hook);
-    });
-}
+/// Controller clicks are tracked natively via [`note_controller_left_click`].
+/// A global WH_MOUSE_LL hook is deliberately avoided to ensure 100% native
+/// mouse performance with zero stutter, zero hook timeouts, and zero cursor freezing.
+pub fn mouse_watch_start() {}
 
 /// Consume the "clicked inside a text box" edge (true at most once per click).
 pub fn take_text_click() -> bool {

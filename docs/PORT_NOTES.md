@@ -82,11 +82,11 @@ assertion), so the Rust FFI matches the original byte-for-byte on x64.
   build to keep it honest.
 - **Ease of Access registration / secure desktop** — `EaseOfAccessInstaller`,
   `AssistiveTechnologyRegistration`, secure-desktop profile sources.
-- **Installers / task-scheduler startup** — `TaskFileInstaller`,
-  `ShortcutStartupProgramService`, elevation/UAC, single-instance, uninstall.
-- **x360ce emulator** installer/downloader; **update checker**; **notifications**
-  beyond the tray; **process-specific profile auto-switch** and the **help
-  overlay**.
+- **Installers and uninstall flow** — the original installer is not ported.
+  The current app has its own scheduled-task startup and single-instance guard.
+- **x360ce emulator** installer/downloader and **update checker**. The current
+  app has process-specific profile switching, an on-screen help overlay, and
+  notifications beyond the tray.
 
 ## 3. The virtual keyboard (new)
 
@@ -98,18 +98,19 @@ rebuilt verbatim. It was replaced by a **modern, tidy grid overlay**
   types correctly in any app.
 - Pinned **bottom-centre**, topmost, **no-activate** (`WS_EX_NOACTIVATE` via
   `enforce_overlay_style`) so it never steals focus from the target app.
-- **Auto-show** on a detected text caret (`GetGUIThreadInfo` heuristic) —
-  `vk_auto_show`, default on; toggle with **LeftThumb** or the tray menu.
+- **Optional auto-show** on a detected text caret (`GetGUIThreadInfo`
+  heuristic) — `vk_auto_show`, default off; toggle manually with **LeftThumb**
+  or the tray menu.
 - Shift latch, Space/Enter/Backspace/Tab/arrows/Esc, close button.
 
 ## 4. Known limitations
 
-- **Guide button** and dedicated power-off need XInput's ordinal-only exports
-  (`GetStateEx #100`, `PowerOff #103`), which are not resolved (named exports
-  only). Guide reads as not-pressed; power-off falls back to a hard rumble.
-- **eFrame windows** run on worker threads with winit's `any_thread` enabled
-  (set through eframe's `event_loop_builder` hook) because winit otherwise
-  panics outside the main thread.
+- **Guide button** and dedicated power-off use XInput's ordinal-only exports
+  (`GetStateEx #100`, `PowerOff #103`) when the installed XInput DLL exposes
+  them. They remain unavailable on DLLs without those exports.
+- **Settings** run in a separate process to avoid an event-loop conflict with
+  the virtual keyboard. A short-lived runtime snapshot shares the background
+  engine's connection, mode, battery, and active profile with that window.
 
 ## 5. Build / run
 

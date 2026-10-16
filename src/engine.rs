@@ -134,7 +134,6 @@ fn pointer_delta(
 
     // Radial cruise & sustained hold cruise curve (mirrors & enhances AMGP cruise acceleration).
     let zone = if m.modifier_zone > 0.0 { m.modifier_zone.min(32767.0) } else { 32767.0 };
-    let over = ((mag - zone) / (32767.0 - zone).max(1.0)).clamp(0.0, 1.0);
 
     // Temporal cruise: holding stick deflection continuously ramps velocity
     // up to 1.6x over ~1.5s after an initial 350ms dead-time.
@@ -151,25 +150,18 @@ fn pointer_delta(
         1.0
     };
 
-    let cruise = (1.0 + over * over * 2.0) * time_mult;
-
     // AltSnap: once the stick is pushed hard it becomes a precision tool.
     let snap = altsnap_factor(mag, m);
 
-    // Backwards compatibility: the old acceleration/threshold pair is still
-    // honoured so existing configs keep their feel.
-    let mut accel_mult = 1.0f32;
+    // Smooth linear acceleration ramp when pushed past threshold.
     if norm > m.acceleration_threshold {
         *accel = (*accel + m.acceleration * dt as f32).min(m.acceleration);
     } else {
         *accel = (*accel - m.acceleration * 3.0 * dt as f32).max(0.0);
     }
-    if m.acceleration > 0.0 {
-        accel_mult = 1.0 + *accel / m.acceleration;
-    }
 
     let base = m.speed + *accel;
-    let total = base * cruise * accel_mult * snap;
+    let total = base * time_mult * snap;
     let sx = if m.speed_x > 0.0 { m.speed_x } else { m.speed };
     let sy = if m.speed_y > 0.0 { m.speed_y } else { m.speed };
     // Per-axis speed: scale each component by its own speed ratio.
@@ -864,6 +856,16 @@ impl Engine {
                 self.nav_right_cooldown = 0.0;
             }
             self.feed_nav(&gp, dt);
+
+            // While virtual keyboard is visible, analog mouse motion and scrolling
+            // MUST continue running smoothly so the mouse NEVER freezes!
+            let left = std::mem::take(&mut self.left_stick);
+            self.update_stick(&left, (lx, ly), now, dt, true);
+            self.left_stick = left;
+
+            let right = std::mem::take(&mut self.right_stick);
+            self.update_stick(&right, (rx, ry), now, dt, false);
+            self.right_stick = right;
             return;
         } else if self.nav_active {
             // Leaving nav mode: suppress any buttons still physically held down
@@ -1021,6 +1023,8 @@ impl Engine {
         if axes.0 == 0.0 && axes.1 == 0.0 {
             self.move_state.accel_accum = 0.0;
             self.move_state.cruise_time = 0.0;
+            self.move_state.leftover_x = 0.0;
+            self.move_state.leftover_y = 0.0;
             return;
         }
         let mut m = self.config.mouse.clone();
@@ -1103,22 +1107,6 @@ impl Engine {
         if b & B_DPAD_UP != 0 {
             dy -= 1;
         }
-        const STICK_TH: i16 = 16000;
-        if dx == 0 {
-            if gp.sThumbLX > STICK_TH {
-                dx = 1;
-            } else if gp.sThumbLX < -STICK_TH {
-                dx = -1;
-            }
-        }
-        if dy == 0 {
-            // Stick up (+Y) should move the cursor up (dy -1).
-            if gp.sThumbLY > STICK_TH {
-                dy = -1;
-            } else if gp.sThumbLY < -STICK_TH {
-                dy = 1;
-            }
-        }
 
         // Movement with first-step-immediate + hold-repeat.
         let moving = dx != 0 || dy != 0;
@@ -1144,6 +1132,7 @@ impl Engine {
         }
 
         // Right stick discrete movement (for Dual-Stick Split Keyboard mode).
+        const STICK_TH: i16 = 16000;
         let mut rdx: i32 = 0;
         let mut rdy: i32 = 0;
         if gp.sThumbRX > STICK_TH {
@@ -1476,7 +1465,12 @@ fn on_pressed(
             let _ = repeat;
             let _ = now;
         }
-        Action::MouseClick(btn) => mouse::button_down(*btn),
+        Action::MouseClick(btn) => {
+            if *btn == mouse::MouseButton::Left {
+                crate::platform::note_controller_left_click();
+            }
+            mouse::button_down(*btn);
+        }
         Action::Combo(keys) => {
             for k in keys {
                 key.down(*k);
@@ -1658,7 +1652,8 @@ mod tests {
 
     #[test]
     fn diagonal_gate_snaps_near_centre_to_eight_ways() {
-        let m = ms();
+        let mut m = ms();
+        m.diagonal_range = 12.0;
         // A tiny off-axis nudge must come out as a pure axis, not a diagonal.
         let (x, y) = shape_stick(3000.0, 400.0, &m, 100.0);
         assert!(
@@ -1668,6 +1663,13 @@ mod tests {
         // Well past the gate the true angle is preserved again.
         let (x2, y2) = shape_stick(20000.0, 20000.0, &m, 100.0);
         assert!((x2 - y2).abs() < 1.0, "diagonal must stay diagonal: {x2},{y2}");
+    }
+
+    #[test]
+    fn diagonal_default_is_pure_free_analog() {
+        let m = ms();
+        let (_x, y) = shape_stick(3000.0, 400.0, &m, 100.0);
+        assert!(y > 350.0, "true analog angle must be preserved: {y}");
     }
 
     #[test]
@@ -1767,7 +1769,7 @@ mod tests {
             let (px, py) = pointer_delta((0.0, 30000.0), &m, &mut accel, &mut cruise, dt, 0.0, ly);
             let screen_y = py * -1.0f32; // default: not inverted
             total += screen_y.trunc();
-            ly = screen_y.fract();
+            ly = py.fract();
             let _ = px;
         }
         assert!(

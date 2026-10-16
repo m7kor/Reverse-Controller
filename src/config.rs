@@ -76,7 +76,7 @@ fn d_sniper_scale() -> f32 {
     0.25
 }
 fn d_speed() -> f32 {
-    600.0
+    1100.0
 }
 fn d_modifier_zone() -> f32 {
     10000.0
@@ -85,11 +85,8 @@ fn d_max_zone() -> f32 {
     32700.0
 }
 fn d_diagonal_range() -> f32 {
-    // A small gate: only the very centre is quantised to 8 directions. The
-    // reference profile's 80 is expressed against a 32767 rail and would, here,
-    // swallow 80% of every push and mangle the direction of anything but a
-    // deliberate 45-degree push.
-    12.0
+    // 0.0 = True 360-degree analog freedom with zero quantization or glitching.
+    0.0
 }
 fn d_altsnap_zone() -> f32 {
     24000.0
@@ -368,7 +365,7 @@ pub struct Config {
     pub enabled: bool,
     /// Temporarily disable input while a borderless-fullscreen app has focus
     /// (port of `FullScreenLoopDisabler`).
-    #[serde(default = "d_true")]
+    #[serde(default)]
     pub disable_in_fullscreen: bool,
     /// Start automatically with Windows (HKCU Run key).
     #[serde(default)]
@@ -426,29 +423,35 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load(path: &std::path::Path) -> Config {
+    pub fn try_load(path: &std::path::Path) -> Result<Config, String> {
         if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("amgp")) {
-            return match crate::amgp::load_amgp_file(path) {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    eprintln!("[config] amgp parse error in {}: {e}; using defaults", path.display());
-                    Config::default()
-                }
-            };
+            return crate::amgp::load_amgp_file(path);
         }
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                // If it's XML (e.g. user renamed or pointed an .amgp XML file to config.json), try amgp parser
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let clean_text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        match serde_json::from_str(clean_text) {
+            Ok(config) => Ok(config),
+            Err(error) => {
+                // Older imports can contain the original XML under a .json name.
                 if text.contains("<gamecontroller") {
-                    if let Ok(cfg) = crate::amgp::parse_amgp_xml(&text) {
-                        return cfg;
+                    if let Ok(config) = crate::amgp::parse_amgp_xml(&text) {
+                        return Ok(config);
                     }
                 }
-                eprintln!("[config] parse error in {}: {e}; using defaults", path.display());
-                Config::default()
-            }),
-            Err(_) => Config::default(),
+                Err(format!("parse {}: {error}", path.display()))
+            }
         }
+    }
+
+    pub fn load(path: &std::path::Path) -> Config {
+        if !path.exists() {
+            return Config::default();
+        }
+        Self::try_load(path).unwrap_or_else(|error| {
+            eprintln!("[config] {error}; using defaults");
+            Config::default()
+        })
     }
 
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
@@ -505,6 +508,21 @@ mod tests {
         assert_eq!(back.bindings.len(), cfg.bindings.len());
         assert!(back.enabled);
         assert!(!back.vk_auto_show);
+    }
+
+    #[test]
+    fn corrupt_config_is_rejected_for_live_reload() {
+        let path = std::env::temp_dir().join(format!(
+            "cc-corrupt-config-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"{\"enabled\":").unwrap();
+        assert!(Config::try_load(&path).is_err());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

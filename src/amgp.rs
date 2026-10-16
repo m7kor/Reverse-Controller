@@ -84,9 +84,9 @@ pub fn parse_amgp_xml(xml: &str) -> Result<Config, String> {
 
     Ok(Config {
         enabled: true,
-        disable_in_fullscreen: true,
+        disable_in_fullscreen: false,
         autostart: false,
-        vk_auto_show: true,
+        vk_auto_show: false,
         mouse,
         controller,
         bindings,
