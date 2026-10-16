@@ -6,6 +6,7 @@
 // The Win32 FFI layer deliberately mirrors the spelling of the Windows API
 // (HWND, MSG, KEYBDINPUT, ...). Renaming them would make the bindings harder to
 // match against Microsoft's documentation, so this lint is off crate-wide.
+#![windows_subsystem = "windows"]
 #![allow(clippy::upper_case_acronyms)]
 
 mod actions;
@@ -60,6 +61,23 @@ fn main() {
         eprintln!("{msg}");
     }));
     platform::attach_to_interactive_desktop();
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn ShowWindow(hwnd: *mut std::ffi::c_void, cmd: i32) -> i32;
+        }
+        let console = GetConsoleWindow();
+        if !console.is_null() {
+            let has_cli = std::env::args().any(|a| a == "--help" || a == "-h" || a == "--status");
+            if !has_cli {
+                ShowWindow(console, 0); // SW_HIDE
+            }
+        }
+    }
     let elevated = platform::is_elevated();
     platform::log_debug(&format!("[main] Starting Controller Companion PID={} elevated={elevated}", std::process::id()));
     let args: Vec<String> = std::env::args().skip(1).collect();
