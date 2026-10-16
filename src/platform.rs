@@ -717,7 +717,7 @@ pub fn is_fullscreen() -> bool {
             return false;
         }
 
-        // Ignore desktop background and taskbar shells
+        // Ignore desktop background, taskbar shells, Start Menu, Settings, and UWP app frames
         let mut class_buf = [0u16; 64];
         let class_len = GetClassNameW(w, class_buf.as_mut_ptr(), class_buf.len() as i32);
         if class_len > 0 {
@@ -725,7 +725,27 @@ pub fn is_fullscreen() -> bool {
             if class_name == "Progman"
                 || class_name == "WorkerW"
                 || class_name == "Shell_TrayWnd"
+                || class_name == "Shell_SecondaryTrayWnd"
                 || class_name == "Windows.UI.Core.CoreWindow"
+                || class_name == "ApplicationFrameWindow"
+                || class_name == "Xaml_WindowedPopupClass"
+                || class_name.starts_with("Windows.UI.")
+            {
+                return false;
+            }
+        }
+
+        // Known Windows system, shell, and Settings processes are never fullscreen games
+        if let Some(exe) = foreground_process_name() {
+            let exe_lower = exe.to_lowercase();
+            if exe_lower == "explorer.exe"
+                || exe_lower == "systemsettings.exe"
+                || exe_lower == "startmenuexperiencehost.exe"
+                || exe_lower == "searchhost.exe"
+                || exe_lower == "shellexperiencehost.exe"
+                || exe_lower == "textinputhost.exe"
+                || exe_lower == "applicationframehost.exe"
+                || exe_lower == "lockapp.exe"
             {
                 return false;
             }
@@ -1156,12 +1176,55 @@ extern "system" {
 const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
 const MONITOR_DEFAULTTONEAREST: DWORD = 2;
 const HKEY_CURRENT_USER: HKEY = 0x8000_0001 as HKEY;
+const HKEY_LOCAL_MACHINE: HKEY = 0x8000_0002 as HKEY;
 const KEY_WRITE: DWORD = 0x20006;
 const REG_SZ: DWORD = 1;
+const REG_DWORD: DWORD = 4;
 const ERROR_SUCCESS: LSTATUS = 0;
 
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Disables Windows built-in XAML/UWP Gamepad-to-VirtualKey navigation
+/// (`ControllerProcessor\ControllerToVKMapping`).
+///
+/// By default in Windows 10/11, the OS intercepts XInput gamepads inside the Start Menu,
+/// Windows Settings, and UWP apps, which hides the mouse cursor and forces
+/// directional arrow navigation with a thick white focus rectangle.
+/// Setting `Enabled` = 0 ensures full mouse cursor control is always available everywhere.
+pub fn disable_windows_gamepad_navigation() {
+    unsafe {
+        for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+            let subkey = to_wide("SOFTWARE\\Microsoft\\Input\\Settings\\ControllerProcessor\\ControllerToVKMapping");
+            let mut hkey: HKEY = std::ptr::null_mut();
+            let mut disp: DWORD = 0;
+            let status = RegCreateKeyExW(
+                root,
+                subkey.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                KEY_WRITE,
+                std::ptr::null_mut(),
+                &mut hkey,
+                &mut disp,
+            );
+            if status == ERROR_SUCCESS && !hkey.is_null() {
+                let val_name = to_wide("Enabled");
+                let data: u32 = 0;
+                RegSetValueExW(
+                    hkey,
+                    val_name.as_ptr(),
+                    0,
+                    REG_DWORD,
+                    &data as *const u32 as *const u8,
+                    4,
+                );
+                RegCloseKey(hkey);
+            }
+        }
+    }
 }
 
 /// Best-effort foreground-process executable file name (lowercased), or None.

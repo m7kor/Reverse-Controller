@@ -206,6 +206,10 @@ fn main() {
         }
     }
 
+    // Ensure Windows built-in XAML/UWP gamepad navigation hijacking is disabled
+    // so mouse control is always 100% active in Windows Settings, Start Menu, etc.
+    platform::disable_windows_gamepad_navigation();
+
     if open_standalone_settings {
         #[cfg(feature = "gui")]
         {
