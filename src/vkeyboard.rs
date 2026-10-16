@@ -879,6 +879,8 @@ struct VKbdApp {
     goal_x_right: f32,
     last_cursor_moved: u8,
     repositioning: bool,
+    reposition_rx: f32,
+    reposition_ry: f32,
     emoji_cat: usize,
 }
 
@@ -943,6 +945,8 @@ impl VKbdApp {
             goal_x_right,
             last_cursor_moved: 0,
             repositioning: false,
+            reposition_rx: 0.0,
+            reposition_ry: 0.0,
             emoji_cat: 0,
         }
     }
@@ -1039,6 +1043,8 @@ impl VKbdApp {
         self.toolbar_col = 0;
         self.radial_selected_slice = None;
         self.repositioning = false;
+        self.reposition_rx = 0.0;
+        self.reposition_ry = 0.0;
         if let Ok(mut g) = self.nav.lock() {
             g.is_repositioning = false;
         }
@@ -1535,6 +1541,13 @@ impl VKbdApp {
             }
             Err(_) => return false,
         };
+        // If the overlay is newly surfacing, ignore any stale close/hide queued from prior sessions!
+        if !self.shown {
+            n.close = 0;
+            n.hide = 0;
+        }
+        self.reposition_rx = n.right_stick_x;
+        self.reposition_ry = n.right_stick_y;
         n.dx = n.dx.clamp(-1, 1);
         n.dy = n.dy.clamp(-1, 1);
         if self.rows.is_empty() {
@@ -1716,6 +1729,10 @@ impl VKbdApp {
             if let Ok(mut g) = self.nav.lock() {
                 g.is_repositioning = self.repositioning;
             }
+            if self.repositioning && self.window_pos.is_none() {
+                let (wx, wy, ww, wh) = platform::work_area();
+                self.window_pos = Some(self.prefs.anchor((wx, wy, ww, wh), None));
+            }
             crate::sound::play_sfx(crate::sound::SoundEffect::RadialSnap);
             crate::engine::trigger_haptic(10000, 14000, 0.04);
         }
@@ -1820,6 +1837,9 @@ impl eframe::App for VKbdApp {
                 self.warm_frames = 0;
                 self.reset_transient();
                 crate::platform::trim_working_set();
+                if let Ok(mut g) = self.nav.lock() {
+                    g.clear_close_and_hide();
+                }
             }
             ctx.request_repaint_after(IDLE_REPAINT);
             return;
@@ -1944,14 +1964,11 @@ impl eframe::App for VKbdApp {
         };
 
         if self.repositioning {
-            let (rx, ry) = if let Ok(lock) = self.nav.lock() {
-                (lock.right_stick_x, lock.right_stick_y)
-            } else {
-                (0.0, 0.0)
-            };
-            let deadzone = 4500.0;
+            let rx = self.reposition_rx;
+            let ry = self.reposition_ry;
+            let deadzone = 4000.0;
             if rx.abs() > deadzone || ry.abs() > deadzone {
-                let speed = 14.0;
+                let speed = 18.0;
                 let dx = (rx / 32768.0) * speed;
                 let dy = (-ry / 32768.0) * speed;
                 let cur = self.window_pos.unwrap_or(origin);
@@ -1964,7 +1981,7 @@ impl eframe::App for VKbdApp {
                 if self.window_pos != Some((nx, ny)) {
                     self.window_pos = Some((nx, ny));
                     self.prefs.remember_position = true;
-                    platform::move_window(WINDOW_TITLE, nx, ny);
+                    platform::place_window(WINDOW_TITLE, nx, ny, want.0.round() as i32, want.1.round() as i32);
                     ctx.request_repaint();
                 }
             }

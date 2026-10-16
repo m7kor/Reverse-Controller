@@ -71,10 +71,24 @@ impl VkNav {
     /// Read the pending state and reset it (single consumer).
     pub fn drain(&mut self) -> VkNav {
         let is_rep = self.is_repositioning;
+        let rx = self.right_stick_x;
+        let ry = self.right_stick_y;
+        let sx = self.stick_x;
+        let sy = self.stick_y;
         let s = *self;
         *self = VkNav::default();
         self.is_repositioning = is_rep;
+        self.right_stick_x = rx;
+        self.right_stick_y = ry;
+        self.stick_x = sx;
+        self.stick_y = sy;
         s
+    }
+
+    /// Reset any queued close or hide signals so stale cancel requests never kill a newly opened keyboard.
+    pub fn clear_close_and_hide(&mut self) {
+        self.close = 0;
+        self.hide = 0;
     }
 }
 
@@ -83,17 +97,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drain_preserves_is_repositioning_flag() {
-        let mut nav = VkNav::default();
-        nav.dx = 3;
-        nav.select = 1;
-        nav.is_repositioning = true;
+    fn drain_preserves_is_repositioning_and_analog_sticks() {
+        let mut nav = VkNav {
+            dx: 3,
+            select: 1,
+            close: 2,
+            is_repositioning: true,
+            right_stick_x: 12000.0,
+            right_stick_y: -8000.0,
+            stick_x: 5000.0,
+            stick_y: -5000.0,
+            ..Default::default()
+        };
+
         let drained = nav.drain();
         assert_eq!(drained.dx, 3);
         assert_eq!(drained.select, 1);
+        assert_eq!(drained.close, 2);
         assert!(drained.is_repositioning);
+        assert_eq!(drained.right_stick_x, 12000.0);
+        assert_eq!(drained.right_stick_y, -8000.0);
+
         assert_eq!(nav.dx, 0);
         assert_eq!(nav.select, 0);
+        assert_eq!(nav.close, 0);
         assert!(nav.is_repositioning, "is_repositioning must persist after drain");
+        assert_eq!(nav.right_stick_x, 12000.0, "analog stick X must persist after drain");
+        assert_eq!(nav.right_stick_y, -8000.0, "analog stick Y must persist after drain");
+        assert_eq!(nav.stick_x, 5000.0, "left stick X must persist after drain");
+        assert_eq!(nav.stick_y, -5000.0, "left stick Y must persist after drain");
+
+        nav.close = 1;
+        nav.hide = 1;
+        nav.clear_close_and_hide();
+        assert_eq!(nav.close, 0);
+        assert_eq!(nav.hide, 0);
     }
 }

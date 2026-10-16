@@ -866,6 +866,11 @@ impl Engine {
                 self.current_mods = 0;
                 self.next_mods = 0;
                 self.nav_active = true;
+                if let Some(nav_arc) = &self.vk_nav {
+                    if let Ok(mut nav) = nav_arc.lock() {
+                        nav.clear_close_and_hide();
+                    }
+                }
                 self.nav_prev_buttons = buttons;
                 self.nav_suppress_buttons = buttons;
                 self.nav_was_moving = false;
@@ -896,6 +901,11 @@ impl Engine {
             // Leaving nav mode: suppress any buttons still physically held down
             // (e.g. L3 or B used to close the keyboard) until the user releases them!
             self.nav_active = false;
+            if let Some(nav_arc) = &self.vk_nav {
+                if let Ok(mut nav) = nav_arc.lock() {
+                    nav.clear_close_and_hide();
+                }
+            }
             self.nav_prev_buttons = 0;
             self.nav_suppress_buttons = buttons;
             self.nav_was_moving = false;
@@ -1552,7 +1562,10 @@ fn on_pressed(
         Action::VoiceDictation => {
             #[cfg(feature = "voice")]
             {
-                crate::voice::toggle_voice_typing(false);
+                let is_ar = crate::platform::active_input_language()
+                    .map(|l| l == crate::vkeyboard::Lang::Ar)
+                    .unwrap_or(true);
+                crate::voice::toggle_voice_typing(is_ar);
             }
             #[cfg(not(feature = "voice"))]
             {

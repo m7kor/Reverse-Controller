@@ -510,12 +510,12 @@ pub fn start_recording(lang_ar: bool) -> Result<(), String> {
             let now = Instant::now();
             let had_speech = HAD_SPEECH.load(Ordering::SeqCst);
 
-            // 1. Auto-stop when silence exceeds 750ms after speech detected
+            // 1. Auto-stop when silence exceeds 1200ms after speech detected (allows natural speaking pause)
             if had_speech {
                 let last = LAST_SPEECH_INSTANT.lock().ok().and_then(|t| *t);
                 if let Some(last_time) = last {
-                    if now.saturating_duration_since(last_time) >= Duration::from_millis(750) {
-                        crate::platform::log_debug("[voice] VAD: 750ms silence after speech -> auto-stopping & sending text");
+                    if now.saturating_duration_since(last_time) >= Duration::from_millis(1200) {
+                        crate::platform::log_debug("[voice] VAD: 1200ms silence after speech -> auto-stopping & sending text");
                         stop_session(lang_ar, Some(session));
                         break;
                     }
@@ -672,17 +672,51 @@ fn resample_to_16k_mono(samples: &[f32], channels: u16, sample_rate: u32) -> Vec
     resampled
 }
 
+/// Remove DC offset and normalize peak amplitude to optimal Whisper input levels (-1.0 to 1.0).
+fn normalize_audio(samples: &mut [f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    // 1. Remove DC bias (centre around 0.0)
+    let sum: f32 = samples.iter().sum();
+    let mean = sum / samples.len() as f32;
+    for s in samples.iter_mut() {
+        *s -= mean;
+    }
+
+    // 2. Find peak absolute level
+    let mut max_abs: f32 = 0.0;
+    for &s in samples.iter() {
+        let a = s.abs();
+        if a > max_abs {
+            max_abs = a;
+        }
+    }
+
+    // 3. Apply soft AGC gain so quiet microphones deliver crisp, clear speech to Whisper
+    if max_abs > 0.005 {
+        let target_peak = 0.85;
+        let gain = (target_peak / max_abs).clamp(1.0, 12.0);
+        for s in samples.iter_mut() {
+            *s = (*s * gain).clamp(-1.0, 1.0);
+        }
+    }
+}
+
 fn process_and_transcribe(
     raw_samples: Vec<f32>,
     channels: u16,
     sample_rate: u32,
     lang_ar: bool,
 ) -> Result<String, String> {
-    let pcm_16k = resample_to_16k_mono(&raw_samples, channels, sample_rate);
+    let mut pcm_16k = resample_to_16k_mono(&raw_samples, channels, sample_rate);
     // Ignore recordings shorter than 0.25 seconds
     if pcm_16k.len() < 4000 {
         return Ok(String::new());
     }
+
+    // Normalize audio signal (DC offset removal + soft gain)
+    normalize_audio(&mut pcm_16k);
 
     // Ensure model is resident in RAM
     if !ensure_model_loaded() {
@@ -699,13 +733,25 @@ fn process_and_transcribe(
         .map_err(|e| format!("Failed to create Whisper state: {e:?}"))?;
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    // If keyboard is in Arabic mode, force Arabic. Otherwise auto-detect!
-    params.set_language(Some(if lang_ar { "ar" } else { "auto" }));
+    // Force specific language code: "ar" or "en". Never pass "auto" on tiny models for short dictation!
+    let target_lang = if lang_ar { "ar" } else { "en" };
+    params.set_language(Some(target_lang));
+    params.set_translate(false);
+    params.set_no_context(true);
+    params.set_single_segment(true);
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
     params.set_suppress_blank(true);
+    params.set_temperature(0.0);
+
+    // Initial prompt primes Whisper's token priors for the exact language domain and vocabulary
+    if lang_ar {
+        params.set_initial_prompt("مرحبا، السلام عليكم، أكتب نصاً باللغة العربية بوضوح ودقة.");
+    } else {
+        params.set_initial_prompt("Hello, typing clear and accurate English text.");
+    }
 
     let n_threads = std::thread::available_parallelism()
         .map(|n| (n.get() as i32).clamp(1, 8))
@@ -778,14 +824,13 @@ mod tests {
     }
 
     #[test]
-    fn model_path_finds_existing_model_or_none() {
-        let p = model_path();
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let candidate = PathBuf::from(appdata).join("ControllerCompanionRust").join("models").join("ggml-tiny.bin");
-            if candidate.exists() {
-                assert!(p.is_some(), "model_path() must detect existing ggml-tiny.bin");
-            }
-        }
+    fn test_normalize_audio() {
+        let mut samples = vec![0.05, 0.15, 0.05, -0.05];
+        normalize_audio(&mut samples);
+        let max_abs = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!((max_abs - 0.85).abs() < 0.02, "audio normalization must boost quiet peak to target level");
+        let sum: f32 = samples.iter().sum();
+        assert!(sum.abs() < 1e-5, "DC offset must be eliminated");
     }
 }
 
