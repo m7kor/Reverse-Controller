@@ -431,6 +431,9 @@ fn point_is_text_field(pt: POINT) -> bool {
         || class_name == "DirectUIHWND"
         || class_name == "Progman"
         || class_name == "WorkerW"
+        || class_name == "CabinetWClass"
+        || class_name == "ShellTabWindowClass"
+        || class_name == "XamlExplorerHostIslandWindow"
     {
         return caret_active();
     }
@@ -1235,13 +1238,15 @@ fn compute_task_switcher() -> bool {
         if len > 0 {
             let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
             if class_name == "MultitaskingViewFrame"
-                || class_name == "XamlExplorerHostIslandWindow"
                 || class_name == "TaskSwitcherWnd"
                 || class_name == "TaskSwitcherOverlayWnd"
             {
                 return true;
             }
-            if class_name == "Windows.UI.Core.CoreWindow" || class_name == "ApplicationFrameWindow" {
+            if class_name == "XamlExplorerHostIslandWindow"
+                || class_name == "Windows.UI.Core.CoreWindow"
+                || class_name == "ApplicationFrameWindow"
+            {
                 let mut title_buf = [0u16; 128];
                 let tlen = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32);
                 if tlen > 0 {
@@ -1249,6 +1254,7 @@ fn compute_task_switcher() -> bool {
                     if title.contains("Task View")
                         || title.contains("Task Switching")
                         || title.contains("Switch to")
+                        || title.contains("AltTab")
                         || title.contains("تبديل المهام")
                     {
                         return true;
@@ -1426,6 +1432,77 @@ pub fn trim_working_set() {
         }
         SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
+}
+
+#[repr(C)]
+struct PROCESSENTRY32W {
+    dwSize: DWORD,
+    cntUsage: DWORD,
+    th32ProcessID: DWORD,
+    th32DefaultHeapID: usize,
+    th32ModuleID: DWORD,
+    cntThreads: DWORD,
+    th32ParentProcessID: DWORD,
+    pcPriClassBase: i32,
+    dwFlags: DWORD,
+    szExeFile: [u16; 260],
+}
+
+/// Terminate other running instances of controller-companion.exe / ReverseController.exe
+/// so that a newly launched instance (especially elevated) can cleanly take over without
+/// being blocked by single-instance locks.
+pub fn kill_other_instances() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dwFlags: DWORD, th32ProcessID: DWORD) -> HANDLE;
+        fn Process32FirstW(hSnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL;
+        fn Process32NextW(hSnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL;
+        fn OpenProcess(dwDesiredAccess: DWORD, bInheritHandle: BOOL, dwProcessId: DWORD) -> HANDLE;
+        fn TerminateProcess(hProcess: HANDLE, uExitCode: u32) -> BOOL;
+        fn GetCurrentProcessId() -> DWORD;
+    }
+
+    const TH32CS_SNAPPROCESS: DWORD = 0x00000002;
+    const PROCESS_TERMINATE: DWORD = 0x0001;
+
+    let current_pid = unsafe { GetCurrentProcessId() };
+    let current_exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .unwrap_or_default();
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if !snapshot.is_null() && snapshot != -1isize as HANDLE {
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as DWORD;
+
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    if entry.th32ProcessID != current_pid && entry.th32ProcessID != 0 {
+                        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                        let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+                        let is_target = name == "controller-companion.exe"
+                            || name == "reversecontroller.exe"
+                            || (!current_exe_name.is_empty() && name == current_exe_name);
+                        if is_target {
+                            log_debug(&format!("[platform] Terminating previous instance PID={}", entry.th32ProcessID));
+                            let hp = OpenProcess(PROCESS_TERMINATE, 0, entry.th32ProcessID);
+                            if !hp.is_null() {
+                                let _ = TerminateProcess(hp, 0);
+                                let _ = CloseHandle(hp);
+                            }
+                        }
+                    }
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(80));
 }
 
 /// Relaunch this process elevated using ShellExecute "runas" (mirrors AdminElevator.cs).

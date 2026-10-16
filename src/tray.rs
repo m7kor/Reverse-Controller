@@ -432,6 +432,18 @@ pub fn run(
         }
         TRAY_HWND.store(hwnd, Ordering::Relaxed);
 
+        #[link(name = "user32")]
+        extern "system" {
+            fn ChangeWindowMessageFilterEx(
+                hwnd: HWND,
+                message: u32,
+                action: u32,
+                p_change_filter_struct: *mut c_void,
+            ) -> i32;
+        }
+        ChangeWindowMessageFilterEx(hwnd, CBTRAY, 1, std::ptr::null_mut());
+        ChangeWindowMessageFilterEx(hwnd, WM_COMMAND, 1, std::ptr::null_mut());
+
         let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         nid.hWnd = hwnd;

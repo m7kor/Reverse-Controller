@@ -10,6 +10,7 @@
 
 mod actions;
 pub mod amgp;
+#[cfg(feature = "gui")]
 pub mod arabic;
 mod bindings;
 mod config;
@@ -22,6 +23,7 @@ pub mod osd;
 mod platform;
 pub mod predict;
 mod profiles;
+mod runtime_status;
 pub mod sound;
 mod tray;
 mod vknav;
@@ -60,19 +62,15 @@ fn main() {
     platform::attach_to_interactive_desktop();
     let elevated = platform::is_elevated();
     platform::log_debug(&format!("[main] Starting Controller Companion PID={} elevated={elevated}", std::process::id()));
-    if elevated {
-        // When running elevated, ensure the Scheduled Task is registered so it auto-starts on logon with highest privileges silently
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = platform::install_scheduled_task(&exe.to_string_lossy());
-        }
-    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut config_path = default_config_path();
     let mut write_default = false;
     let mut print_default = false;
     let mut status_only = false;
     let mut stdin_exit = false;
+    #[cfg(feature = "gui")]
     let mut demo_kb = false;
+    #[cfg(feature = "gui")]
     let mut demo_kb_ar = false;
     let mut open_standalone_settings = false;
     let mut trace_pad = false;
@@ -97,6 +95,7 @@ fn main() {
                 }
                 return;
             }
+            #[cfg(feature = "gui")]
             "--demo-kb" => demo_kb = true,
             // Diagnostics: print the raw pad state once per second so it is
             // obvious whether input is lost at XInput, the dead zone, or the
@@ -123,6 +122,7 @@ fn main() {
             }
             #[cfg(feature = "gui")]
             "--trace-keys" => vkeyboard::set_trace(true),
+            #[cfg(feature = "gui")]
             "--demo-kb-ar" => {
                 demo_kb = true;
                 demo_kb_ar = true;
@@ -225,8 +225,44 @@ fn main() {
         return;
     }
 
+    if status_only {
+        let config = Config::load(&config_path);
+        let xinput = match win32::XInputApi::load() {
+            Ok(api) => api,
+            Err(error) => {
+                eprintln!("[status] XInput unavailable: {error}");
+                std::process::exit(1);
+            }
+        };
+        println!("configured controller slot: {}", config.controller.controller_index);
+        let mut found = false;
+        for idx in 0..4 {
+            if xinput.get_state(idx).is_some() {
+                found = true;
+                println!("controller {idx}: CONNECTED");
+                if let Some(battery) = xinput.battery(idx) {
+                    println!("battery: type=0x{:02X} level=0x{:02X}", battery.BatteryType, battery.BatteryLevel);
+                }
+            }
+        }
+        if !found {
+            println!("no XInput controller connected (slots 0-3)");
+        }
+        return;
+    }
+
+    // Terminate any previous instance so that a newly launched (or elevated) instance takes over cleanly
+    platform::kill_other_instances();
+
     // Single-instance enforcement: prevent duplicate background instances
-    let (_instance_mutex, already_running) = win32::create_named_mutex("Local\\ControllerCompanionRust_InstanceLock");
+    let (mut instance_mutex, mut already_running) = win32::create_named_mutex("Local\\ControllerCompanionRust_InstanceLock");
+    if already_running {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let (m2, a2) = win32::create_named_mutex("Local\\ControllerCompanionRust_InstanceLock");
+        instance_mutex = m2;
+        already_running = a2;
+    }
+    let _instance_mutex = instance_mutex;
     if already_running {
         eprintln!("[main] Another instance of Controller Companion is already running. Exiting.");
         return;
@@ -243,6 +279,12 @@ fn main() {
         config.controller.right_stick_dead_zone,
         config.enabled
     );
+
+    if elevated && config.autostart {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = platform::install_scheduled_task(&exe.to_string_lossy());
+        }
+    }
 
     // Apply autostart registration to match the persisted setting.
     if let Ok(exe) = std::env::current_exe() {
@@ -262,20 +304,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-
-    if status_only {
-        let idx = config.controller.controller_index;
-        match xinput.get_state(idx) {
-            Some(_) => {
-                println!("controller {idx}: CONNECTED");
-                if let Some(b) = xinput.battery(idx) {
-                    println!("battery: type=0x{:02X} level=0x{:02X}", b.BatteryType, b.BatteryLevel);
-                }
-            }
-            None => println!("controller {idx}: not connected"),
-        }
-        return;
-    }
 
     // Shared, reloadable running flag between the control thread and the engine.
     let running = Arc::new(AtomicBool::new(true));
@@ -324,6 +352,7 @@ fn main() {
     };
     #[cfg(not(feature = "gui"))]
     let vk_flag: Option<Arc<AtomicBool>> = None;
+    #[cfg(feature = "gui")]
     if let Some(f) = vk_flag.clone() {
         if let Ok(mut e) = engine.lock() {
             e.set_vk_handle(f.clone());
@@ -351,10 +380,10 @@ fn main() {
                         }
 
                         let immediate = platform::take_text_click();
-                        let is_ctrl = platform::last_click_was_controller() || platform::controller_used_within_ms(2500);
+                        let is_ctrl = platform::last_click_was_controller();
                         let recent_click = platform::last_click_within_ms(250);
                         let is_text = is_ctrl && recent_click && (platform::is_cursor_ibeam() || platform::caret_active());
-                        if immediate || is_text {
+                        if is_ctrl && (immediate || is_text) {
                             platform::clear_last_click();
                             let was_vis = f2.load(Ordering::SeqCst);
                             if !was_vis {
@@ -370,7 +399,7 @@ fn main() {
                             }
                         }
                     }
-                    std::thread::sleep(Duration::from_millis(35));
+                    std::thread::sleep(Duration::from_millis(60));
                 }
             });
         }
@@ -427,13 +456,35 @@ fn main() {
         }
     });
 
+    // Publish the engine's real state for the separate settings process.
+    let status_engine = engine.clone();
+    let status_running = running.clone();
+    let status_path = runtime_status::path_for_config(&config_path);
+    let status_thread = std::thread::spawn(move || {
+        let mut publish_failed = false;
+        while status_running.load(Ordering::Relaxed) {
+            if let Ok(engine) = status_engine.lock() {
+                match runtime_status::publish(&status_path, &engine.runtime_status()) {
+                    Ok(()) => publish_failed = false,
+                    Err(error) if !publish_failed => {
+                        eprintln!("[status] publish failed: {error}");
+                        publish_failed = true;
+                    }
+                    Err(_) => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let _ = std::fs::remove_file(status_path);
+    });
+
     // Auto-switch the active profile when a program listed in a profile's
     // process rules takes focus. Polled rather than event-driven: it is a
     // foreground-window check, and a slow poll costs nothing at this scale.
     {
         let sw_engine = engine.clone();
         let sw_running = running.clone();
-        let sw_path = config_path.clone();
+        let _sw_path = config_path.clone();
         std::thread::spawn(move || {
             let dir = crate::config::profiles_dir();
             let mut current = String::new();
@@ -470,16 +521,11 @@ fn main() {
                     if target_stem == crate::profiles::DEFAULT_NAME {
                         println!("[main] auto-switch -> '{target_stem}' for {exe}");
                         e.set_profile(crate::profiles::DEFAULT_NAME, crate::bindings::default_profile());
-                        let cfg = e.config().clone();
-                        let _ = cfg.save(&sw_path);
-                        crate::osd::show_profile(&target_stem);
                     } else if let Some(h) = hit {
                         match crate::profiles::load(&h.path) {
                             Ok(p) => {
                                 println!("[main] auto-switch -> '{target_stem}' for {exe}");
                                 e.set_profile(&target_stem, p.bindings);
-                                let cfg = e.config().clone();
-                                let _ = cfg.save(&sw_path);
                                 crate::osd::show_profile(&target_stem);
                             }
                             Err(err) => eprintln!("[main] auto-switch to '{target_stem}' failed: {err}"),
@@ -502,10 +548,14 @@ fn main() {
             crate::voice::check_idle_unload();
             if let Ok(m) = std::fs::metadata(&watch_path).and_then(|m| m.modified()) {
                 if Some(m) != last_mod {
-                    last_mod = Some(m);
                     if let Ok(mut e) = watch_engine.lock() {
-                        e.reload_from_disk(&watch_path);
-                        println!("[main] reloaded updated config from {}", watch_path.display());
+                        match e.reload_from_disk(&watch_path) {
+                            Ok(()) => {
+                                last_mod = Some(m);
+                                println!("[main] reloaded updated config from {}", watch_path.display());
+                            }
+                            Err(error) => eprintln!("[main] config reload deferred: {error}"),
+                        }
                     }
                 }
             }
@@ -575,6 +625,7 @@ fn main() {
     platform::log_debug("[main] running flag dropped, joining threads");
     let _ = tray_thread.join();
     let _ = engine_thread.join();
+    let _ = status_thread.join();
 
     // Persist current runtime config (including enabled state) to disk.
     if let Ok(e) = engine.lock() {
