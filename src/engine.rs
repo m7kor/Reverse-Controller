@@ -850,6 +850,7 @@ impl Engine {
                 self.next_mods = 0;
                 self.nav_active = true;
                 self.nav_prev_buttons = buttons;
+                self.nav_suppress_buttons = buttons;
                 self.nav_was_moving = false;
                 self.nav_cooldown = 0.0;
                 self.nav_was_moving_right = false;

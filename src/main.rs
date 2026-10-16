@@ -404,14 +404,26 @@ fn main() {
             let run2 = running.clone();
             let eng2 = engine.clone();
             std::thread::spawn(move || {
+                let mut opened_at: Option<Instant> = None;
                 while run2.load(Ordering::Relaxed) {
                     let enabled = eng2.lock().map(|e| e.config().vk_auto_show).unwrap_or(false);
                     if enabled {
-                        // If user clicked outside with their physical mouse, dismiss the on-screen keyboard
-                        if f2.load(Ordering::Relaxed) && platform::is_physical_mouse_button_down() && !platform::last_click_within_ms(300) {
-                            f2.store(false, Ordering::SeqCst);
-                            platform::set_window_visible("CCVKbd", false);
-                            vkeyboard::request_vkeyboard_repaint();
+                        let is_vis = f2.load(Ordering::Relaxed);
+                        if is_vis {
+                            // If user clicked outside with their physical mouse, dismiss the on-screen keyboard.
+                            // - Immunity guard: Must have been opened for at least 600ms so the opening click cannot self-dismiss.
+                            // - Outside guard: Cursor must not be over the virtual keyboard overlay itself.
+                            // - Physical mouse guard: Handled inside is_physical_mouse_button_down() which ignores controller clicks.
+                            let immunity_passed = opened_at.map(|t| t.elapsed() >= Duration::from_millis(600)).unwrap_or(false);
+                            let outside_overlay = !platform::cursor_is_inside_overlay();
+                            if immunity_passed && outside_overlay && platform::is_physical_mouse_button_down() {
+                                f2.store(false, Ordering::SeqCst);
+                                platform::set_window_visible("CCVKbd", false);
+                                vkeyboard::request_vkeyboard_repaint();
+                                opened_at = None;
+                            }
+                        } else {
+                            opened_at = None;
                         }
 
                         let immediate = platform::take_text_click();
@@ -419,7 +431,7 @@ fn main() {
                         let recent_click = platform::last_click_within_ms(250);
                         let is_text = is_ctrl && recent_click && (platform::is_cursor_ibeam() || platform::caret_active());
                         if is_ctrl && (immediate || is_text) {
-                            platform::clear_last_click();
+                            platform::reset_last_click_was_controller();
                             let was_vis = f2.load(Ordering::SeqCst);
                             if !was_vis {
                                 crate::platform::log_debug("[main] Text click detected -> surfacing virtual keyboard");
@@ -431,6 +443,7 @@ fn main() {
                                 platform::place_window("CCVKbd", origin.0, origin.1, base_w, base_h);
                                 platform::set_window_visible("CCVKbd", true);
                                 vkeyboard::request_vkeyboard_repaint();
+                                opened_at = Some(Instant::now());
                             }
                         }
                     }

@@ -228,8 +228,40 @@ pub fn note_controller_left_click() {
     }
 }
 
+pub fn reset_last_click_was_controller() {
+    LAST_CLICK_WAS_CONTROLLER.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub fn is_physical_mouse_button_down() -> bool {
+    if controller_used_within_ms(600) || last_click_was_controller() {
+        return false;
+    }
     unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 }
+}
+
+pub fn cursor_is_inside_overlay() -> bool {
+    let ov = overlay_hwnd() as HWND;
+    if ov.is_null() {
+        return false;
+    }
+    unsafe {
+        let mut pt: POINT = std::mem::zeroed();
+        if GetCursorPos(&mut pt) == 0 {
+            return false;
+        }
+        let under = WindowFromPoint(pt);
+        if under.is_null() {
+            return false;
+        }
+        if under == ov || GetAncestor(under, GA_ROOT) == ov || GetParent(under) == ov {
+            return true;
+        }
+        let mut rect: RECT = std::mem::zeroed();
+        if GetWindowRect(ov, &mut rect) != 0 {
+            return pt.x >= rect.left && pt.x <= rect.right && pt.y >= rect.top && pt.y <= rect.bottom;
+        }
+        false
+    }
 }
 
 #[repr(C)]
@@ -955,7 +987,7 @@ static OVERLAY_HWND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 /// Handle of the overlay window (looked up lazily by title).
 pub fn overlay_hwnd() -> usize {
     let cached = OVERLAY_HWND.load(std::sync::atomic::Ordering::SeqCst);
-    if cached != 0 {
+    if cached != 0 && unsafe { IsWindow(cached as HWND) != 0 } {
         return cached;
     }
     let wide = to_wide("CCVKbd");
