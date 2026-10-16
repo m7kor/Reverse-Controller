@@ -180,14 +180,16 @@ const IDLE_REPAINT: Duration = Duration::from_millis(1500);
 const HINTS: &[(&str, &str)] = &[
     ("D-Pad / Left stick", "Move between keys"),
     ("Up from row 0", "Quick actions & word predictions"),
-    ("LT / RT", "Jump one row up / down"),
+    ("L1 / R1 (LB / RB)", "Move text cursor ◄ / ►"),
+    ("R2 (RT)", "Capitalize letters (Shift)"),
+    ("L2 (LT)", "Numbers & symbols (#+=)"),
+    ("R3 (Right stick click)", "Move keyboard anywhere"),
     ("A", "Press the highlighted key"),
     ("X / Y", "Backspace / Space"),
     ("Start", "Enter"),
-    ("LB / RB", "Shift / Switch #+= layer"),
     ("Back (Select)", "Switch language (EN / ع)"),
     ("B / L3", "Close keyboard"),
-    ("R3", "Show / hide this help"),
+    ("😊 / Emoji", "Open Native Emoji Picker"),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -200,6 +202,7 @@ pub enum Lang {
 pub enum Layer {
     Abc,
     Num,
+    Emoji,
 }
 
 /// Shift is tri-state, like the Windows touch keyboard.
@@ -281,6 +284,7 @@ enum Act {
     FlipPosition,
     Emoji(&'static str),
     EmojiPicker,
+    EmojiCat(usize),
     ToggleSplitMode,
 }
 
@@ -591,11 +595,78 @@ fn align_rows(rows: &mut [Vec<KDef>], target_units: f32) {
     }
 }
 
+fn emoji_layer(cat: usize) -> Vec<Vec<KDef>> {
+    let tabs = vec![
+        KDef::spec("😀", Act::EmojiCat(0), 1.8),
+        KDef::spec("👍", Act::EmojiCat(1), 1.8),
+        KDef::spec("❤️", Act::EmojiCat(2), 1.8),
+        KDef::spec("🎉", Act::EmojiCat(3), 1.8),
+        KDef::spec("🍕", Act::EmojiCat(4), 1.8),
+        KDef::spec("🚀", Act::EmojiCat(5), 1.8),
+        KDef::spec("ABC", Act::ToggleLayer, 2.0),
+        KDef::spec("\u{232B}", Act::Backspace, 2.2).with_glyph(Glyph::Backspace),
+    ];
+
+    let emojis: &[&[&'static str]] = match cat {
+        1 => &[
+            &["👍", "👎", "👏", "🙌", "👐", "🤲", "🤝", "👊", "✊", "🤛", "🤜"],
+            &["🤞", "✌️", "🤟", "🤘", "👌", "🤏", "👈", "👉", "👆", "👇", "☝️"],
+            &["✋", "🤚", "🖐️", "🖖", "👋", "🤙", "💪", "🦾", "🙏", "✍️", "🤳"],
+        ],
+        2 => &[
+            &["❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣️"],
+            &["💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "💯", "🔥", "✨"],
+            &["🌟", "⭐", "💥", "💢", "💫", "💬", "💭", "🗯️", "💤", "👑", "💎"],
+        ],
+        3 => &[
+            &["🎉", "🎊", "🎈", "🎁", "🏆", "🥇", "🥈", "🥉", "⚽", "🏀", "🎮"],
+            &["🕹️", "🎲", "🎯", "🎳", "🎵", "🎶", "🎤", "🎧", "🍿", "🎬", "🎨"],
+            &["🎪", "🎭", "🎰", "🎫", "🎟️", "🎸", "🎹", "🎺", "🥁", "🛹", "🚴"],
+        ],
+        4 => &[
+            &["☕", "🍵", "🥤", "🍕", "🍔", "🍟", "🌭", "🥪", "🌮", "🌯", "🍖"],
+            &["🍗", "🥩", "🍣", "🍦", "🍩", "🍰", "🍫", "🍬", "🍭", "🍮", "🍯"],
+            &["🍎", "🍌", "🍉", "🍇", "🍓", "🍒", "🍑", "🍍", "🥥", "🥑", "🥕"],
+        ],
+        5 => &[
+            &["🚀", "🚗", "✈️", "🛵", "🚲", "⚡", "💡", "🔔", "📱", "💻", "🖥️"],
+            &["⌨️", "🕒", "⏳", "🔑", "🔒", "🔓", "📌", "📍", "🚩", "✅", "❌"],
+            &["⚠️", "❓", "❗", "➕", "➖", "✖️", "➗", "💲", "🌍", "🌙", "☀️"],
+        ],
+        _ => &[
+            &["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇", "🙂"],
+            &["🙃", "😉", "😌", "😍", "🥰", "😘", "😋", "😛", "😜", "🤪", "🤨"],
+            &["😎", "🥳", "😏", "😒", "😞", "🥺", "😢", "😭", "😤", "😠", "😡"],
+        ],
+    };
+
+    let mut rows = vec![tabs];
+    for r in emojis {
+        let mut row_keys = Vec::new();
+        for &em in *r {
+            row_keys.push(KDef::spec(em, Act::Emoji(em), 1.3));
+        }
+        rows.push(row_keys);
+    }
+
+    let bottom = vec![
+        KDef::spec("ABC", Act::ToggleLayer, 2.0),
+        KDef::spec("?123", Act::ToggleLayer, 1.8),
+        KDef::spec("Space", Act::Space, 6.0),
+        KDef::spec(".", Act::Char('.', None), 1.2),
+        KDef::spec("\u{23CE}", Act::Enter, 2.4).with_glyph(Glyph::Enter),
+    ];
+    rows.push(bottom);
+
+    rows
+}
+
 fn build_layout(lang: Lang, layer: Layer) -> Vec<Vec<KDef>> {
     let mut rows = match (lang, layer) {
         (Lang::En, Layer::Abc) => en_abc(),
         (Lang::Ar, Layer::Abc) => ar_abc(),
         (lang, Layer::Num) => num_layer(lang),
+        (_, Layer::Emoji) => emoji_layer(0),
     };
     let target = layout_units(&rows);
     align_rows(&mut rows, target);
@@ -779,6 +850,8 @@ struct VKbdApp {
     goal_x_left: f32,
     goal_x_right: f32,
     last_cursor_moved: u8,
+    repositioning: bool,
+    emoji_cat: usize,
 }
 
 impl VKbdApp {
@@ -840,11 +913,17 @@ impl VKbdApp {
             goal_x_left,
             goal_x_right,
             last_cursor_moved: 0,
+            repositioning: false,
+            emoji_cat: 0,
         }
     }
 
     fn rebuild(&mut self) {
-        self.rows = build_layout(self.lang, self.layer);
+        self.rows = if self.layer == Layer::Emoji {
+            emoji_layer(self.emoji_cat)
+        } else {
+            build_layout(self.lang, self.layer)
+        };
         self.dirty = false;
         self.clamp_cursor();
     }
@@ -1041,6 +1120,7 @@ impl VKbdApp {
                 self.layer = match self.layer {
                     Layer::Abc => Layer::Num,
                     Layer::Num => Layer::Abc,
+                    Layer::Emoji => Layer::Abc,
                 };
                 self.dirty = true;
             }
@@ -1162,10 +1242,14 @@ impl VKbdApp {
             Act::EmojiPicker => {
                 crate::sound::play_sfx(crate::sound::SoundEffect::RadialSnap);
                 crate::engine::trigger_haptic(8000, 10000, 0.03);
-                self.key.down(NavKey::LWin);
-                self.key.down(NavKey::OemPeriod);
-                self.key.up(NavKey::OemPeriod);
-                self.key.up(NavKey::LWin);
+                self.layer = if self.layer == Layer::Emoji { Layer::Abc } else { Layer::Emoji };
+                self.dirty = true;
+            }
+            Act::EmojiCat(cat) => {
+                self.emoji_cat = cat;
+                self.dirty = true;
+                crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
+                crate::engine::trigger_haptic(6000, 8000, 0.02);
             }
             Act::ToggleSplitMode => {
                 self.split_mode = !self.split_mode;
@@ -1407,7 +1491,11 @@ impl VKbdApp {
             self.altgr = !self.altgr;
         }
         if n.layer > 0 {
-            self.layer = if self.layer == Layer::Abc { Layer::Num } else { Layer::Abc };
+            self.layer = match self.layer {
+                Layer::Abc => Layer::Num,
+                Layer::Num => Layer::Abc,
+                Layer::Emoji => Layer::Abc,
+            };
             self.dirty = true;
         }
         if n.lang > 0 {
@@ -1560,6 +1648,17 @@ impl VKbdApp {
             }
             self.cursor = (r, c);
         }
+        if n.reposition_toggle > 0 {
+            self.repositioning = !self.repositioning;
+            crate::sound::play_sfx(crate::sound::SoundEffect::RadialSnap);
+            crate::engine::trigger_haptic(10000, 14000, 0.04);
+        }
+        for _ in 0..n.caret_left.min(4) {
+            self.perform_in_context(Act::Key(NavKey::Left));
+        }
+        for _ in 0..n.caret_right.min(4) {
+            self.perform_in_context(Act::Key(NavKey::Right));
+        }
         for _ in 0..n.backspace.min(2) {
             self.perform_in_context(Act::Backspace);
         }
@@ -1572,7 +1671,7 @@ impl VKbdApp {
         for _ in 0..n.period {
             self.perform_in_context(Act::Char('.', None));
         }
-        // `close` and L3 (`hide`) both dismiss; R3 (`help`) toggles the hints.
+        // `close` and L3 (`hide`) both dismiss.
         if n.close > 0 || n.hide > 0 {
             self.hide();
         }
@@ -1744,7 +1843,7 @@ impl eframe::App for VKbdApp {
         let want = (win_w * self.prefs.scale, win_h * self.prefs.scale);
 
         let origin = match (self.window_pos, self.drag_anchor.is_some()) {
-            (Some(p), _) if self.prefs.remember_position => {
+            (Some(p), _) if self.prefs.remember_position || self.repositioning => {
                 let min_x = wx as f32;
                 let min_y = wy as f32;
                 let max_x = (wx as f32 + sw - want.0).max(min_x);
@@ -1777,7 +1876,34 @@ impl eframe::App for VKbdApp {
             }
         };
 
-        if self.drag_anchor.is_none()
+        if self.repositioning {
+            let (rx, ry) = if let Ok(lock) = self.nav.lock() {
+                (lock.right_stick_x, lock.right_stick_y)
+            } else {
+                (0.0, 0.0)
+            };
+            let deadzone = 4500.0;
+            if rx.abs() > deadzone || ry.abs() > deadzone {
+                let speed = 14.0;
+                let dx = (rx / 32768.0) * speed;
+                let dy = (-ry / 32768.0) * speed;
+                let cur = self.window_pos.unwrap_or(origin);
+                let min_x = wx as f32;
+                let min_y = wy as f32;
+                let max_x = (wx as f32 + sw - want.0).max(min_x);
+                let max_y = (wy as f32 + sh - want.1).max(min_y);
+                let nx = ((cur.0 as f32 + dx).clamp(min_x, max_x)).round() as i32;
+                let ny = ((cur.1 as f32 + dy).clamp(min_y, max_y)).round() as i32;
+                if self.window_pos != Some((nx, ny)) {
+                    self.window_pos = Some((nx, ny));
+                    self.prefs.remember_position = true;
+                    platform::move_window(WINDOW_TITLE, nx, ny);
+                    ctx.request_repaint();
+                }
+            }
+        }
+
+        if self.drag_anchor.is_none() && !self.repositioning
             && (!self.shown || self.sized != want || self.frame.is_multiple_of(90))
         {
             let ok = platform::place_window(
@@ -1930,6 +2056,23 @@ impl eframe::App for VKbdApp {
                     );
                 }
 
+                if self.repositioning {
+                    let banner = egui::Rect::from_min_size(
+                        egui::pos2(area.left() + 20.0, area.top() + 6.0),
+                        egui::vec2(area.width() - 40.0, 22.0),
+                    );
+                    let p = ui.painter();
+                    p.rect_filled(banner, 6.0, egui::Color32::from_rgb(0, 120, 215));
+                    p.rect_stroke(banner, 6.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                    p.text(
+                        banner.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "✥ وضع تحريك الكيبورد: حرك بالقير الأيمن • اضغط R3 للتثبيت",
+                        egui::FontId::proportional(11.5),
+                        egui::Color32::WHITE,
+                    );
+                }
+
                 // Hints overlay sits on top; any click on it dismisses it.
                 if hints_on && paint_hints(ui, area) {
                     pending.push(Act::Hints);
@@ -2012,7 +2155,7 @@ impl eframe::App for VKbdApp {
         }
 
         // Fast repaints only when something is animating or repeating.
-        let busy = self.repeat.is_some() || flash_pos.is_some() || self.drag_anchor.is_some();
+        let busy = self.repeat.is_some() || flash_pos.is_some() || self.drag_anchor.is_some() || self.repositioning;
         ctx.request_repaint_after(Duration::from_millis(if busy { 16 } else { 33 }));
     }
 }
@@ -2734,6 +2877,7 @@ fn paint_chrome(ui: &mut egui::Ui, area: egui::Rect, st: &ChromeStatus) -> Chrom
         (Lang::Ar, Layer::Abc) => "ع · أبجد",
         (Lang::En, Layer::Num) => "EN · 123",
         (Lang::Ar, Layer::Num) => "ع · 123",
+        (_, Layer::Emoji) => "😊 EMOJI",
     };
     let reshaped_mode = if st.lang == Lang::Ar {
         crate::arabic::reshape_ar(mode_tag)

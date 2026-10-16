@@ -22,6 +22,10 @@ pub struct VkNav {
     pub space: u32,
     /// Number of close requests (B / O, the ✕ button, or Back).
     pub close: u32,
+    /// Move text cursor left in text field (L1 / LB).
+    pub caret_left: u32,
+    /// Move text cursor right in text field (R1 / RB).
+    pub caret_right: u32,
     /// Number of Shift-latch toggles (RightShoulder / RightTrigger).
     pub shift: u32,
     /// Number of AltGr-latch toggles (LeftTrigger).
@@ -52,6 +56,12 @@ pub struct VkNav {
     pub select_right: u32,
     /// Number of requests to toggle Dual-Stick Split Keyboard mode.
     pub toggle_split: u32,
+    /// Number of requests to toggle Keyboard Repositioning / Move Mode (R3).
+    pub reposition_toggle: u32,
+    /// Raw right stick X (-32768..32767) for keyboard repositioning.
+    pub right_stick_x: f32,
+    /// Raw right stick Y (-32768..32767) for keyboard repositioning.
+    pub right_stick_y: f32,
 }
 
 impl VkNav {

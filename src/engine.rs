@@ -334,6 +334,10 @@ pub struct Engine {
     nav_backspace_next: f64,
     nav_space_down: f64,
     nav_space_next: f64,
+    nav_caret_left_down: f64,
+    nav_caret_left_next: f64,
+    nav_caret_right_down: f64,
+    nav_caret_right_next: f64,
     switcher_prev_buttons: u16,
     switcher_was_moving: bool,
     switcher_cooldown: f64,
@@ -387,6 +391,10 @@ impl Engine {
             nav_backspace_next: 0.0,
             nav_space_down: 0.0,
             nav_space_next: 0.0,
+            nav_caret_left_down: 0.0,
+            nav_caret_left_next: 0.0,
+            nav_caret_right_down: 0.0,
+            nav_caret_right_next: 0.0,
             switcher_prev_buttons: 0,
             switcher_was_moving: false,
             switcher_cooldown: 0.0,
@@ -878,6 +886,14 @@ impl Engine {
             self.nav_cooldown = 0.0;
             self.nav_was_moving_right = false;
             self.nav_right_cooldown = 0.0;
+            self.nav_backspace_down = 0.0;
+            self.nav_backspace_next = 0.0;
+            self.nav_space_down = 0.0;
+            self.nav_space_next = 0.0;
+            self.nav_caret_left_down = 0.0;
+            self.nav_caret_left_next = 0.0;
+            self.nav_caret_right_down = 0.0;
+            self.nav_caret_right_next = 0.0;
             for e in &mut self.digital {
                 e.is_down = false;
                 e.was_pressed = false;
@@ -1226,23 +1242,48 @@ impl Engine {
                         f.store(false, Ordering::SeqCst);
                     }
                 }
-                // Shoulders: LB toggles Shift, RB switches #+= / ABC layer.
+                // Shoulders:
+                // L1 (LB): Move caret left with continuous hold-to-repeat
                 if newly & B_LEFT_SHOULDER != 0 {
-                    nav.shift += 1;
+                    nav.caret_left += 1;
+                    self.nav_caret_left_down = now;
+                    self.nav_caret_left_next = now + 0.35;
+                } else if b & B_LEFT_SHOULDER != 0 {
+                    if self.nav_caret_left_down > 0.0 && now >= self.nav_caret_left_next {
+                        nav.caret_left += 1;
+                        self.nav_caret_left_next = now + 0.065;
+                    }
+                } else {
+                    self.nav_caret_left_down = 0.0;
+                    self.nav_caret_left_next = 0.0;
                 }
+
+                // R1 (RB): Move caret right with continuous hold-to-repeat
                 if newly & B_RIGHT_SHOULDER != 0 {
-                    nav.layer += 1;
+                    nav.caret_right += 1;
+                    self.nav_caret_right_down = now;
+                    self.nav_caret_right_next = now + 0.35;
+                } else if b & B_RIGHT_SHOULDER != 0 {
+                    if self.nav_caret_right_down > 0.0 && now >= self.nav_caret_right_next {
+                        nav.caret_right += 1;
+                        self.nav_caret_right_next = now + 0.065;
+                    }
+                } else {
+                    self.nav_caret_right_down = 0.0;
+                    self.nav_caret_right_next = 0.0;
                 }
-                // Analogue triggers jump a whole row at a time OR select in split mode.
+
+                // Analogue triggers:
+                // L2 (LT): Go to numbers and symbols list (?123 / #+=)
                 const TRIGGER_TH: u8 = 60;
                 if gp.bLeftTrigger > TRIGGER_TH && self.nav_prev_left_trigger <= TRIGGER_TH {
-                    nav.jump_y -= 1;
-                    nav.select_left += 1;
+                    nav.layer += 1;
                 }
+                // R2 (RT): Capitalize letters (Shift / Caps toggle)
                 if gp.bRightTrigger > TRIGGER_TH && self.nav_prev_right_trigger <= TRIGGER_TH {
-                    nav.jump_y += 1;
-                    nav.select_right += 1;
+                    nav.shift += 1;
                 }
+
                 // Start types Enter (as in the original profile).
                 if newly & B_START != 0 {
                     nav.enter += 1;
@@ -1251,7 +1292,7 @@ impl Engine {
                 if newly & B_BACK != 0 {
                     nav.lang += 1;
                 }
-                // Sticks: L3 hides the keyboard, R3 toggles the help overlay.
+                // Sticks: L3 hides the keyboard, R3 toggles Keyboard Repositioning / Move Mode!
                 // L3 + R3 pressed together toggles Dual-Stick Split mode.
                 if (newly & (B_LEFT_THUMB | B_RIGHT_THUMB) != 0)
                     && (b & B_LEFT_THUMB != 0)
@@ -1266,8 +1307,10 @@ impl Engine {
                     }
                 }
                 if newly & B_RIGHT_THUMB != 0 {
-                    nav.help += 1;
+                    nav.reposition_toggle += 1;
                 }
+                nav.right_stick_x = gp.sThumbRX as f32;
+                nav.right_stick_y = gp.sThumbRY as f32;
             }
         }
         self.nav_prev_left_trigger = gp.bLeftTrigger;
@@ -1498,10 +1541,7 @@ fn on_pressed(
             }
             #[cfg(not(feature = "voice"))]
             {
-                key.down(crate::keys::Key::LWin);
-                key.down(crate::keys::Key::H);
-                key.up(crate::keys::Key::H);
-                key.up(crate::keys::Key::LWin);
+                crate::platform::log_debug("[engine] Voice dictation triggered, but voice feature not compiled");
             }
         }
         Action::TaskView => {
