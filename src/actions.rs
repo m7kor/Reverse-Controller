@@ -92,6 +92,8 @@ pub enum Action {
     PrevVirtualDesktop,
     /// Summon the 8-slice quick Radial / Pie menu around the cursor.
     RadialMenu,
+    /// Continuous window drag / move driven by stick (native AltSnap replacement).
+    WindowDrag,
     /// A feature that was removed (Steam) or is not ported (help overlay).
     /// Explicitly a no-op and documented.
     Excluded(String),
@@ -127,6 +129,7 @@ impl<'de> Deserialize<'de> for Action {
                 "NextVirtualDesktop" => Ok(Action::NextVirtualDesktop),
                 "PrevVirtualDesktop" => Ok(Action::PrevVirtualDesktop),
                 "RadialMenu" => Ok(Action::RadialMenu),
+                "WindowDrag" => Ok(Action::WindowDrag),
                 other => Err(serde::de::Error::custom(format!("unknown action {other:?}"))),
             },
             serde_json::Value::Object(m) => {

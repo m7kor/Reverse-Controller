@@ -36,6 +36,16 @@ impl Profile {
         Profile { name: None, processes: Vec::new(), bindings }
     }
 
+    /// Built-in preset matching the optimized "Smooth Native Scroll" layout.
+    #[allow(dead_code)]
+    pub fn smooth_native_scroll() -> Self {
+        Profile {
+            name: Some("Smooth Native Scroll".to_string()),
+            processes: Vec::new(),
+            bindings: crate::bindings::default_profile(),
+        }
+    }
+
     /// Does `exe` (a bare process name like `notepad.exe`) select this profile?
     pub fn matches_process(&self, exe: &str) -> bool {
         let exe = exe.to_ascii_lowercase();
@@ -298,5 +308,12 @@ mod tests {
     fn missing_directory_lists_nothing() {
         let d = tmp("does_not_exist_xyz");
         assert!(list(&d).is_empty());
+    }
+
+    #[test]
+    fn smooth_native_scroll_preset_has_bindings() {
+        let p = Profile::smooth_native_scroll();
+        assert_eq!(p.name.as_deref(), Some("Smooth Native Scroll"));
+        assert!(p.bindings.iter().any(|b| b.action == crate::actions::Action::WindowDrag));
     }
 }

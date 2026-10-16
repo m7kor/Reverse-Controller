@@ -144,16 +144,24 @@ struct MSLLHOOKSTRUCT {
 }
 
 /// Window classes that behave as text inputs across Win32, WinUI, Chromium, and Electron.
-const EDIT_CLASSES: [&str; 15] = [
+/// Incorporates strict text classes from the native smooth scroll profile.
+const EDIT_CLASSES: &[&str] = &[
     "Edit",
     "TEdit",
     "TMemo",
+    "RichEdit",
+    "RICHEDIT",
     "RichEdit20W",
+    "RichEdit20A",
     "RICHEDIT50W",
     "ThunderTextBox",
     "RichEditD2DPT",
     "RichEditD2DT",
     "RICHEDIT50",
+    "TextEdit",
+    "TextEditor",
+    "_WwG",
+    "Notepad",
     "NotepadEdit",
     "TextBox",
     "Windows.UI.Input.InputSite",
@@ -598,10 +606,69 @@ extern "system" {
         flags: u32,
     ) -> BOOL;
     fn InvalidateRect(hwnd: HWND, rect: *const RECT, erase: BOOL) -> BOOL;
+    fn GetAncestor(hwnd: HWND, flags: u32) -> HWND;
+    fn IsZoomed(hwnd: HWND) -> BOOL;
 }
 
 const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const GA_ROOT: u32 = 2;
+const SW_RESTORE: i32 = 9;
+
+/// Native smooth window move / drag under cursor (AltSnap replacement).
+///
+/// Displaces the top-level window under the pointer by `(dx, dy)` and keeps the
+/// mouse cursor pinned relative to the window geometry.
+pub fn move_window_at_cursor(dx: i32, dy: i32) {
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt) == 0 {
+            return;
+        }
+        let under = WindowFromPoint(pt);
+        if under.is_null() {
+            return;
+        }
+        let root = GetAncestor(under, GA_ROOT);
+        if root.is_null() {
+            return;
+        }
+        let ov = overlay_hwnd() as HWND;
+        if !ov.is_null() && (root == ov || under == ov) {
+            return;
+        }
+        // Exclude system elements (Desktop, Shell, Taskbar)
+        let mut buf = [0u16; 64];
+        let len = GetClassNameW(root, buf.as_mut_ptr(), 64);
+        if len > 0 {
+            let class = String::from_utf16_lossy(&buf[..len as usize]);
+            if class == "Progman" || class == "WorkerW" || class == "Shell_TrayWnd" {
+                return;
+            }
+        }
+        if IsZoomed(root) != 0 {
+            ShowWindow(root, SW_RESTORE);
+        }
+        let mut rect: RECT = std::mem::zeroed();
+        if GetWindowRect(root, &mut rect) != 0 {
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            SetWindowPos(
+                root,
+                std::ptr::null_mut(),
+                rect.left + dx,
+                rect.top + dy,
+                width,
+                height,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            crate::win32::set_cursor_pos(pt.x + dx, pt.y + dy);
+        }
+    }
+}
 
 fn find_target_hwnd(title: &str) -> HWND {
     if title == "CCVKbd" {

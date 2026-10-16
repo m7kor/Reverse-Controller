@@ -112,12 +112,13 @@ fn shape_stick(lx: f32, ly: f32, m: &crate::config::MouseSettings, dead_zone: f3
 /// the legacy acceleration ramp can all be tested without a mouse or a
 /// controller.
 ///
-/// `accel` is read and updated in place; the returned value already includes
+/// `accel` and `cruise_time` are read and updated in place; the returned value already includes
 /// the carried `leftover` from the previous frame.
 fn pointer_delta(
     axes: (f32, f32),
     m: &crate::config::MouseSettings,
     accel: &mut f32,
+    cruise_time: &mut f64,
     dt: f64,
     leftover_x: f32,
     leftover_y: f32,
@@ -126,15 +127,31 @@ fn pointer_delta(
     let mag = (x * x + y * y).sqrt();
     if mag == 0.0 {
         *accel = 0.0;
+        *cruise_time = 0.0;
         return (leftover_x, leftover_y);
     }
     let norm = (mag / 32767.0).min(1.0);
 
-    // Radial cruise: gentle at first, then progressively faster once the stick
-    // passes `modifier_zone`. This is the "smooth" of the reference profile.
+    // Radial cruise & sustained hold cruise curve (mirrors & enhances AMGP cruise acceleration).
     let zone = if m.modifier_zone > 0.0 { m.modifier_zone.min(32767.0) } else { 32767.0 };
     let over = ((mag - zone) / (32767.0 - zone).max(1.0)).clamp(0.0, 1.0);
-    let cruise = 1.0 + over * over * 3.0; // up to 4x at full deflection
+
+    // Temporal cruise: holding stick deflection continuously ramps velocity
+    // up to 1.6x over ~1.5s after an initial 350ms dead-time.
+    let time_mult = if mag > zone {
+        *cruise_time += dt;
+        if *cruise_time > 0.35 {
+            let t = ((*cruise_time - 0.35) / 1.5).min(1.0) as f32;
+            1.0 + 0.6 * t * t * (3.0 - 2.0 * t) // smoothstep ramp from 1.0 up to 1.6x
+        } else {
+            1.0
+        }
+    } else {
+        *cruise_time = (*cruise_time - dt * 2.5).max(0.0);
+        1.0
+    };
+
+    let cruise = (1.0 + over * over * 2.0) * time_mult;
 
     // AltSnap: once the stick is pushed hard it becomes a precision tool.
     let snap = altsnap_factor(mag, m);
@@ -193,15 +210,14 @@ fn scroll_ticks(
     let mut ux = x / mag;
     let mut uy = y / mag;
     if m.scroll_four_way {
-        // Snap to the nearest cardinal so the wheel does not creep sideways
-        // when the stick is mostly vertical.
-        if ux.abs() > uy.abs() * 2.0 {
+        // Snap to the nearest cardinal with 1.6:1 hysteresis to prevent diagonal drift
+        if ux.abs() > uy.abs() * 1.6 {
             uy = 0.0;
-        } else if uy.abs() > ux.abs() * 2.0 {
+        } else if uy.abs() > ux.abs() * 1.6 {
             ux = 0.0;
         }
     }
-    let vx = m.wheel_speed_x.max(0.0);
+    let vx = if m.wheel_speed_x > 0.0 { m.wheel_speed_x } else { m.wheel_speed * 0.8 };
     let vy = if m.wheel_speed_y > 0.0 { m.wheel_speed_y } else { m.wheel_speed };
     let ticks_y = if flip_y { -uy } else { uy } * norm * vy * dt as f32;
     let ticks_x = ux * norm * vx * dt as f32;
@@ -247,6 +263,9 @@ struct MoveState {
     leftover_x: f32,
     leftover_y: f32,
     accel_accum: f32,
+    cruise_time: f64,
+    scroll_accum_x: f32,
+    scroll_accum_y: f32,
 }
 
 /// A command a binding can raise for the engine to apply on the next frame.
@@ -974,8 +993,24 @@ impl Engine {
                 // Either the binding or the global override may request the flip.
                 self.mouse_scroll(axes, dt, *flip_y != self.config.mouse.scroll_flip_y)
             }
+            Action::WindowDrag => {
+                self.window_drag(axes, dt);
+            }
             _ => {}
         }
+    }
+
+    /// Continuous window drag / move driven by stick (native AltSnap replacement).
+    fn window_drag(&mut self, axes: (f32, f32), dt: f64) {
+        let (x, y) = axes;
+        let mag = (x * x + y * y).sqrt();
+        if mag <= self.config.controller.right_stick_dead_zone as f32 || mag == 0.0 {
+            return;
+        }
+        let speed = 800.0f32; // smooth window move speed in pixels/s
+        let dx = (x / 32767.0) * speed * dt as f32;
+        let dy = (-y / 32767.0) * speed * dt as f32; // Invert stick Y for screen Y
+        crate::platform::move_window_at_cursor(dx.round() as i32, dy.round() as i32);
     }
 
     /// `axes` are raw XInput units (see `shape_stick`). Movement is computed as
@@ -985,6 +1020,7 @@ impl Engine {
     fn mouse_move(&mut self, axes: (f32, f32), dt: f64, inverted: bool) {
         if axes.0 == 0.0 && axes.1 == 0.0 {
             self.move_state.accel_accum = 0.0;
+            self.move_state.cruise_time = 0.0;
             return;
         }
         let mut m = self.config.mouse.clone();
@@ -1000,6 +1036,7 @@ impl Engine {
             axes,
             &m,
             &mut self.move_state.accel_accum,
+            &mut self.move_state.cruise_time,
             dt,
             self.move_state.leftover_x,
             self.move_state.leftover_y,
@@ -1019,13 +1056,29 @@ impl Engine {
     }
 
     /// Right stick → wheel. `axes` are raw XInput units.
+    /// Accumulates sub-pixel ticks in `scroll_accum_*` so slow micro-deflection
+    /// scrolling is butter-smooth and never dropped.
     fn mouse_scroll(&mut self, axes: (f32, f32), dt: f64, flip_y: bool) {
-        let (ticks_x, ticks_y) = scroll_ticks(axes, &self.config.mouse, self.config.controller.right_stick_dead_zone as f32, dt, flip_y);
-        if ticks_y.abs() >= 0.5 {
-            mouse::scroll_vertical(ticks_y.round() as i32);
+        let (ticks_x, ticks_y) = scroll_ticks(
+            axes,
+            &self.config.mouse,
+            self.config.controller.right_stick_dead_zone as f32,
+            dt,
+            flip_y,
+        );
+        self.move_state.scroll_accum_y += ticks_y;
+        self.move_state.scroll_accum_x += ticks_x;
+
+        let step_y = self.move_state.scroll_accum_y.trunc() as i32;
+        if step_y != 0 {
+            self.move_state.scroll_accum_y -= step_y as f32;
+            mouse::scroll_vertical(step_y);
         }
-        if ticks_x.abs() >= 0.5 {
-            mouse::scroll_horizontal(ticks_x.round() as i32);
+
+        let step_x = self.move_state.scroll_accum_x.trunc() as i32;
+        if step_x != 0 {
+            self.move_state.scroll_accum_x -= step_x as f32;
+            mouse::scroll_horizontal(step_x);
         }
     }
 
@@ -1649,7 +1702,8 @@ mod tests {
             (-0.7071, -0.7071, "down-left"),
         ];
         for (dx, dy, name) in cases {
-            let (px, py) = pointer_delta((dx * push, dy * push), &m, &mut accel, dt, 0.0, 0.0);
+            let mut cruise = 0.0;
+            let (px, py) = pointer_delta((dx * push, dy * push), &m, &mut accel, &mut cruise, dt, 0.0, 0.0);
             // Compare the direction only: AltSnap and the cruise curve scale
             // the magnitude, never the direction.
             let got = (px.signum(), py.signum());
@@ -1664,7 +1718,8 @@ mod tests {
         // to a *negative* screen delta because screen Y grows downward.
         let m = ms();
         let mut accel = 0.0;
-        let (_px, py) = pointer_delta((0.0, 30000.0), &m, &mut accel, 1.0 / 125.0, 0.0, 0.0);
+        let mut cruise = 0.0;
+        let (_px, py) = pointer_delta((0.0, 30000.0), &m, &mut accel, &mut cruise, 1.0 / 125.0, 0.0, 0.0);
         assert!(py > 0.0, "stick up must produce positive stick-space Y");
         let iy = (py * -1.0f32).trunc() as i32;
         assert!(iy <= 0, "stick up must move the cursor up (negative screen Y), got {iy}");
@@ -1682,11 +1737,12 @@ mod tests {
         m.acceleration = 0.0;
         let dt = 1.0 / 125.0;
         let mut accel = 0.0;
+        let mut cruise = 0.0;
         let mut lx = 0.0f32;
         let mut ly = 0.0f32;
         let mut moved = 0i32;
         for _ in 0..25 {
-            let (px, py) = pointer_delta((20000.0, 0.0), &m, &mut accel, dt, lx, ly);
+            let (px, py) = pointer_delta((20000.0, 0.0), &m, &mut accel, &mut cruise, dt, lx, ly);
             moved += px.trunc() as i32;
             lx = px.fract();
             ly = py.fract();
@@ -1704,10 +1760,11 @@ mod tests {
         m.altsnap_enabled = false; // keep the per-frame step constant
         let dt = 1.0 / 125.0;
         let mut accel = 0.0;
+        let mut cruise = 0.0;
         let mut ly = 0.0f32;
         let mut total = 0.0f32;
         for _ in 0..25 {
-            let (px, py) = pointer_delta((0.0, 30000.0), &m, &mut accel, dt, 0.0, ly);
+            let (px, py) = pointer_delta((0.0, 30000.0), &m, &mut accel, &mut cruise, dt, 0.0, ly);
             let screen_y = py * -1.0f32; // default: not inverted
             total += screen_y.trunc();
             ly = screen_y.fract();
@@ -1716,6 +1773,28 @@ mod tests {
         assert!(
             total < 0.0,
             "a sustained upward push must accumulate upward screen motion, got {total}"
+        );
+    }
+
+    #[test]
+    fn temporal_cruise_acceleration_scales_speed_over_time() {
+        let m = ms();
+        let mut accel = 0.0;
+        let mut cruise = 0.0;
+        let dt = 0.01;
+
+        // Frame 1: Initial push past modifier_zone (30000 > 10000)
+        let (p1, _) = pointer_delta((30000.0, 0.0), &m, &mut accel, &mut cruise, dt, 0.0, 0.0);
+
+        // Simulate holding stick for 1.5 seconds
+        for _ in 0..150 {
+            let _ = pointer_delta((30000.0, 0.0), &m, &mut accel, &mut cruise, dt, 0.0, 0.0);
+        }
+        let (p2, _) = pointer_delta((30000.0, 0.0), &m, &mut accel, &mut cruise, dt, 0.0, 0.0);
+
+        assert!(
+            p2 > p1 * 1.3,
+            "sustained stick hold must progressively cruise faster: p1={p1}, p2={p2}"
         );
     }
 
@@ -1762,6 +1841,31 @@ mod tests {
         let (hx2, vy2) = scroll_ticks((30000.0, 2000.0), &m, zone, 0.1, false);
         assert_eq!(vy2, 0.0, "horizontal push must not scroll vertically");
         assert!(hx2 > 0.0);
+    }
+
+    #[test]
+    fn scroll_accumulator_emits_sub_pixel_ticks_smoothly() {
+        let m = ms();
+        let zone = 8689.0;
+        let dt = 1.0 / 120.0;
+        // Gentle micro-push just above deadzone: produces tiny fractional ticks per frame
+        let (_, tiny_tick) = scroll_ticks((0.0, 8900.0), &m, zone, dt, false);
+        assert!(tiny_tick > 0.0 && tiny_tick < 1.0, "tiny micro-push must be fractional, got {tiny_tick}");
+
+        let mut accum_y = 0.0f32;
+        let mut emitted_ticks = 0;
+        for _ in 0..120 {
+            accum_y += tiny_tick;
+            let step = accum_y.trunc() as i32;
+            if step != 0 {
+                accum_y -= step as f32;
+                emitted_ticks += step;
+            }
+        }
+        assert!(
+            emitted_ticks > 0,
+            "sub-pixel ticks must accumulate and emit integer wheel steps over 1 second"
+        );
     }
 
     #[test]
