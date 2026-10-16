@@ -81,16 +81,35 @@ pub fn take_last_transcribed() -> Option<String> {
 
 /// Locate the Whisper model file on disk.
 pub fn model_path() -> Option<PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    let base = PathBuf::from(appdata).join("ControllerCompanionRust").join("models");
+    let mut search_dirs = Vec::new();
 
-    let base_model = base.join("ggml-base.bin");
-    if base_model.exists() {
-        return Some(base_model);
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        search_dirs.push(PathBuf::from(appdata).join("ControllerCompanionRust").join("models"));
     }
-    let tiny_model = base.join("ggml-tiny.bin");
-    if tiny_model.exists() {
-        return Some(tiny_model);
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            search_dirs.push(parent.join("models"));
+            search_dirs.push(parent.to_path_buf());
+        }
+    }
+
+    search_dirs.push(PathBuf::from("models"));
+
+    let candidates = [
+        "ggml-base.bin",
+        "ggml-tiny.bin",
+        "ggml-small.bin",
+        "ggml-medium.bin",
+    ];
+
+    for dir in &search_dirs {
+        for &name in &candidates {
+            let p = dir.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
     }
     None
 }
@@ -756,6 +775,17 @@ mod tests {
         let res = process_voice_macros("مرحبا سطر جديد كيف الحال فاصلة تمام");
         assert!(!res.auto_send);
         assert_eq!(res.text, "مرحبا\nكيف الحال، تمام");
+    }
+
+    #[test]
+    fn model_path_finds_existing_model_or_none() {
+        let p = model_path();
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let candidate = PathBuf::from(appdata).join("ControllerCompanionRust").join("models").join("ggml-tiny.bin");
+            if candidate.exists() {
+                assert!(p.is_some(), "model_path() must detect existing ggml-tiny.bin");
+            }
+        }
     }
 }
 

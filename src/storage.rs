@@ -39,6 +39,8 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+
     #[test]
     fn replacement_is_complete_and_failure_preserves_original() {
         let dir = std::env::temp_dir().join(format!("cc-atomic-{}", std::process::id()));
@@ -48,7 +50,6 @@ mod tests {
         write_atomic(&path, b"new complete data").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"new complete data");
         // A handle denying delete sharing makes replacement fail on Windows.
-        use std::os::windows::fs::OpenOptionsExt;
         let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
         assert!(write_atomic(&path, b"must not replace").is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"new complete data");

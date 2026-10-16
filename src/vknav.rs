@@ -7,6 +7,7 @@
 //! controller (the port of the original `GetKeyboardModeBindings` idea).
 
 #[derive(Default, Clone, Copy)]
+#[allow(dead_code)]
 pub struct VkNav {
     /// Accumulated horizontal grid steps (-1 left, +1 right). Drained by the UI.
     pub dx: i32,
@@ -62,13 +63,37 @@ pub struct VkNav {
     pub right_stick_x: f32,
     /// Raw right stick Y (-32768..32767) for keyboard repositioning.
     pub right_stick_y: f32,
+    /// Whether keyboard repositioning / move mode is currently active.
+    pub is_repositioning: bool,
 }
 
 impl VkNav {
     /// Read the pending state and reset it (single consumer).
     pub fn drain(&mut self) -> VkNav {
+        let is_rep = self.is_repositioning;
         let s = *self;
         *self = VkNav::default();
+        self.is_repositioning = is_rep;
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drain_preserves_is_repositioning_flag() {
+        let mut nav = VkNav::default();
+        nav.dx = 3;
+        nav.select = 1;
+        nav.is_repositioning = true;
+        let drained = nav.drain();
+        assert_eq!(drained.dx, 3);
+        assert_eq!(drained.select, 1);
+        assert!(drained.is_repositioning);
+        assert_eq!(nav.dx, 0);
+        assert_eq!(nav.select, 0);
+        assert!(nav.is_repositioning, "is_repositioning must persist after drain");
     }
 }

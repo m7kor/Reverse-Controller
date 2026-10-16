@@ -662,6 +662,9 @@ fn emoji_layer(cat: usize) -> Vec<Vec<KDef>> {
     ];
     rows.push(bottom);
 
+    let target = layout_units(&rows);
+    align_rows(&mut rows, target);
+
     rows
 }
 
@@ -1035,6 +1038,10 @@ impl VKbdApp {
         self.toolbar_focused = false;
         self.toolbar_col = 0;
         self.radial_selected_slice = None;
+        self.repositioning = false;
+        if let Ok(mut g) = self.nav.lock() {
+            g.is_repositioning = false;
+        }
     }
 
     /// `(highlighted, locked)` for a key face.
@@ -1706,6 +1713,9 @@ impl VKbdApp {
         }
         if n.reposition_toggle > 0 {
             self.repositioning = !self.repositioning;
+            if let Ok(mut g) = self.nav.lock() {
+                g.is_repositioning = self.repositioning;
+            }
             crate::sound::play_sfx(crate::sound::SoundEffect::RadialSnap);
             crate::engine::trigger_haptic(10000, 14000, 0.04);
         }
@@ -2124,7 +2134,7 @@ impl eframe::App for VKbdApp {
                     p.text(
                         banner.center(),
                         egui::Align2::CENTER_CENTER,
-                        "✥ وضع تحريك الكيبورد: حرك بالقير الأيمن • اضغط R3 للتثبيت",
+                        crate::arabic::reshape_ar("✥ وضع تحريك الكيبورد: حرك بالقير الأيمن • اضغط R3 للتثبيت"),
                         egui::FontId::proportional(11.5),
                         egui::Color32::WHITE,
                     );
@@ -2937,7 +2947,7 @@ fn paint_chrome(ui: &mut egui::Ui, area: egui::Rect, st: &ChromeStatus) -> Chrom
         (_, Layer::Emoji) => "😊 EMOJI",
         (_, Layer::Edit) => "EDIT · تحرير",
     };
-    let reshaped_mode = if st.lang == Lang::Ar {
+    let reshaped_mode = if st.lang == Lang::Ar || mode_tag.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)) {
         crate::arabic::reshape_ar(mode_tag)
     } else {
         mode_tag.to_string()
@@ -3921,5 +3931,20 @@ mod tests {
         assert!(!app.split_mode);
         let acts = app.get_toolbar_actions();
         assert!(acts.contains(&Act::ToggleSplitMode));
+    }
+
+    #[test]
+    fn emoji_layer_has_uniform_row_widths_and_reposition_flag() {
+        for cat in 0..6 {
+            let rows = emoji_layer(cat);
+            let target = layout_units(&rows);
+            for (idx, r) in rows.iter().enumerate() {
+                let units: f32 = r.iter().map(|k| k.w).sum();
+                assert!(
+                    (units - target).abs() < 0.01,
+                    "cat {cat} row {idx} width {units} != target {target}"
+                );
+            }
+        }
     }
 }

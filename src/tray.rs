@@ -10,7 +10,7 @@
 use crate::engine::Engine;
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 type HWND = *mut c_void;
@@ -159,6 +159,7 @@ extern "system" {
     fn LoadIconW(inst: HINSTANCE, name: usize) -> HICON;
     fn LoadCursorW(inst: HINSTANCE, name: usize) -> HCURSOR;
     fn GetCursorPos(pt: *mut POINT) -> i32;
+    fn RegisterWindowMessageW(msg: *const u16) -> u32;
 }
 
 #[link(name = "shell32")]
@@ -185,7 +186,30 @@ thread_local! {
     static TRAY_CTX: std::cell::Cell<*mut TrayCtx> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
+static WM_TASKBARCREATED: AtomicU32 = AtomicU32::new(0);
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    let taskbar_created = WM_TASKBARCREATED.load(Ordering::Relaxed);
+    if taskbar_created != 0 && msg == taskbar_created {
+        // Explorer restarted: re-register the notification icon
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON;
+        nid.uCallbackMessage = CBTRAY;
+        nid.hIcon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+        Shell_NotifyIconW(NIM_ADD, &mut nid);
+        nid.uTimeoutOrVersion = NOTIFYICON_VERSION_4;
+        let tip = if crate::platform::is_elevated() {
+            "Controller Companion (Administrator)"
+        } else {
+            "Controller Companion (مفعّل - ENABLED)"
+        };
+        set_tip(hwnd, &mut nid, tip);
+        return 0;
+    }
+
     match msg {
         CBTRAY => {
             // Tray callback: low word of lParam is the mouse event.
@@ -443,6 +467,12 @@ pub fn run(
         }
         ChangeWindowMessageFilterEx(hwnd, CBTRAY, 1, std::ptr::null_mut());
         ChangeWindowMessageFilterEx(hwnd, WM_COMMAND, 1, std::ptr::null_mut());
+
+        let wm_taskbar = RegisterWindowMessageW(to_wide("TaskbarCreated").as_ptr());
+        WM_TASKBARCREATED.store(wm_taskbar, Ordering::SeqCst);
+        if wm_taskbar != 0 {
+            ChangeWindowMessageFilterEx(hwnd, wm_taskbar, 1, std::ptr::null_mut());
+        }
 
         let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;

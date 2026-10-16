@@ -326,6 +326,7 @@ impl KeyPresser {
     /// Inject a single character via `KEYEVENTF_UNICODE` (layout-independent).
     /// Used by the on-screen virtual keyboard for letters, digits, punctuation
     /// and non-Latin scripts such as Arabic.
+    #[allow(dead_code)]
     pub fn send_char(&self, c: char) {
         let mut buf = [0u16; 2];
         let units = c.encode_utf16(&mut buf).len();

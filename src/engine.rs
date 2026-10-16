@@ -347,6 +347,7 @@ pub struct Engine {
 static PENDING_RUMBLE: Mutex<Option<(u16, u16, f64)>> = Mutex::new(None);
 
 /// Trigger a brief tactile rumble pulse from any thread (keyboard, voice, radial menu).
+#[allow(dead_code)]
 pub fn trigger_haptic(left: u16, right: u16, duration_secs: f64) {
     if let Ok(mut lock) = PENDING_RUMBLE.lock() {
         *lock = Some((left, right, duration_secs));
@@ -405,6 +406,7 @@ impl Engine {
     }
 
     /// Provide the shared virtual-keyboard visibility flag (set by main).
+    #[allow(dead_code)]
     pub fn set_vk_handle(&mut self, flag: Arc<AtomicBool>) {
         self.vk_visible = Some(flag);
     }
@@ -424,6 +426,7 @@ impl Engine {
     }
 
     /// Provide the shared keyboard-navigation feed (set by main).
+    #[allow(dead_code)]
     pub fn set_vk_nav(&mut self, nav: Arc<Mutex<VkNav>>) {
         self.vk_nav = Some(nav);
     }
@@ -533,6 +536,7 @@ impl Engine {
     /// Read raw gamepad state for the settings visualizer. Its controller slot
     /// comes from the background process snapshot, which may have auto-scanned
     /// to another slot since this process started.
+    #[allow(dead_code)]
     pub fn gamepad_state_for(&self, index: u32) -> Option<w32::XINPUT_GAMEPAD> {
         self.xinput.get_state(index).map(|s| s.Gamepad)
     }
@@ -878,7 +882,14 @@ impl Engine {
             self.left_stick = left;
 
             let right = std::mem::take(&mut self.right_stick);
-            self.update_stick(&right, (rx, ry), now, dt, false);
+            let is_repositioning = if let Some(nav_arc) = &self.vk_nav {
+                nav_arc.lock().map(|n| n.is_repositioning).unwrap_or(false)
+            } else {
+                false
+            };
+            if !is_repositioning {
+                self.update_stick(&right, (rx, ry), now, dt, false);
+            }
             self.right_stick = right;
             return;
         } else if self.nav_active {
@@ -1310,8 +1321,7 @@ impl Engine {
                     if let Some(f) = &self.vk_visible {
                         f.store(false, Ordering::SeqCst);
                     }
-                }
-                if newly & B_RIGHT_THUMB != 0 {
+                } else if newly & B_RIGHT_THUMB != 0 {
                     nav.reposition_toggle += 1;
                 }
                 nav.right_stick_x = gp.sThumbRX as f32;
@@ -1654,8 +1664,10 @@ mod tests {
     #[test]
     fn back_start_recovers_control_when_disabled_without_repeating() {
         let xinput = w32::XInputApi::load().expect("Windows XInput is available");
-        let mut config = Config::default();
-        config.enabled = false;
+        let mut config = Config {
+            enabled: false,
+            ..Config::default()
+        };
         config.controller.haptic_feedback = false;
         let mut engine = Engine::new(xinput, config);
         let mut pad = w32::XINPUT_GAMEPAD { wButtons: B_BACK | B_START, ..Default::default() };
@@ -1739,15 +1751,16 @@ mod tests {
         // Past the default gate, so the 8-way snap is not applied and the true
         // angle must be preserved.
         let push = 32000.0f32;
+        let d = std::f32::consts::FRAC_1_SQRT_2;
         let cases: [(f32, f32, &str); 8] = [
             (1.0, 0.0, "right"),
             (-1.0, 0.0, "left"),
             (0.0, 1.0, "up"),
             (0.0, -1.0, "down"),
-            (0.7071, 0.7071, "up-right"),
-            (-0.7071, 0.7071, "up-left"),
-            (0.7071, -0.7071, "down-right"),
-            (-0.7071, -0.7071, "down-left"),
+            (d, d, "up-right"),
+            (-d, d, "up-left"),
+            (d, -d, "down-right"),
+            (-d, -d, "down-left"),
         ];
         for (dx, dy, name) in cases {
             let mut cruise = 0.0;
@@ -1769,7 +1782,7 @@ mod tests {
         let mut cruise = 0.0;
         let (_px, py) = pointer_delta((0.0, 30000.0), &m, &mut accel, &mut cruise, 1.0 / 125.0, 0.0, 0.0);
         assert!(py > 0.0, "stick up must produce positive stick-space Y");
-        let iy = (py * -1.0f32).trunc() as i32;
+        let iy = (-py).trunc() as i32;
         assert!(iy <= 0, "stick up must move the cursor up (negative screen Y), got {iy}");
         // And `inverted == true` does the opposite.
         let iy2 = (py * 1.0f32).trunc() as i32;
@@ -1813,7 +1826,7 @@ mod tests {
         let mut total = 0.0f32;
         for _ in 0..25 {
             let (px, py) = pointer_delta((0.0, 30000.0), &m, &mut accel, &mut cruise, dt, 0.0, ly);
-            let screen_y = py * -1.0f32; // default: not inverted
+            let screen_y = -py; // default: not inverted
             total += screen_y.trunc();
             ly = py.fract();
             let _ = px;
@@ -1922,15 +1935,16 @@ mod tests {
         // snapped direction by 90 degrees — pushing right moved the pointer up.
         let m = ms();
         // Force the gate wide so a moderate push is inside it.
+        let d = std::f32::consts::FRAC_1_SQRT_2;
         let cases: [(f32, f32, &str); 8] = [
             (1.0, 0.0, "right"),
             (-1.0, 0.0, "left"),
             (0.0, 1.0, "up"),
             (0.0, -1.0, "down"),
-            (0.7071, 0.7071, "up-right"),
-            (-0.7071, 0.7071, "up-left"),
-            (0.7071, -0.7071, "down-right"),
-            (-0.7071, -0.7071, "down-left"),
+            (d, d, "up-right"),
+            (-d, d, "up-left"),
+            (d, -d, "down-right"),
+            (-d, -d, "down-left"),
         ];
         let push = 5000.0; // inside the default gate
         for (dx, dy, name) in cases {

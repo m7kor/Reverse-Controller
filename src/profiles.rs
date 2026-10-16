@@ -62,6 +62,7 @@ pub struct ProfileEntry {
     pub name: String,
     /// True when the file came from the original `.amgp` format and has not
     /// been rewritten yet.
+    #[allow(dead_code)]
     pub legacy: bool,
 }
 
