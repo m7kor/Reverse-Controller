@@ -1,4 +1,4 @@
-# 🎮 Controller Companion — Native Rust Edition
+# 🎮 Reverse Controller (Controller Companion — Native Rust Edition)
 
 [![Rust](https://img.shields.io/badge/Rust-2021%20Edition-orange?logo=rust)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-blue?logo=windows)](https://microsoft.com/windows)
@@ -37,9 +37,8 @@ A high-performance, ultra-lightweight native **Rust** re-engineering of the Wind
 - 🍕 **Quick 8-Way Radial Pie Menu:**
   - Fast thumbstick selector for common actions (Browser, Task View, Explorer, Media, Virtual Desktops).
 - ⚙️ **Modern Tray & Settings UI:**
-  - Left-click tray icon to toggle control on/off.
-  - Double-click to open Settings.
-  - Right-click for context menu.
+  - Left-click tray icon to open Settings.
+  - Right-click for full context menu with instant toggle switch (`✔ Enable Controller`).
   - Import existing `.amgp` profiles with automatic conversion.
 
 ---
