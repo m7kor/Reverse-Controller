@@ -81,15 +81,18 @@ pub fn load(path: &Path) -> Result<Profile, String> {
         return Ok(Profile::from_bindings(cfg.bindings));
     }
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
+    serde_json::from_str(raw.strip_prefix('\u{feff}').unwrap_or(&raw)).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 pub fn save(dir: &Path, stem: &str, profile: &Profile) -> Result<PathBuf, String> {
+    if stem.is_empty() || stem.starts_with('.') || stem.ends_with(['.', ' ']) || stem.chars().any(|c| c.is_control() || "<>:\"/\\|?*".contains(c)) {
+        return Err("Profile name must be a plain filename without reserved characters".into());
+    }
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join(format!("{stem}.json"));
     let raw = serde_json::to_string_pretty(profile)
         .map_err(|e| format!("serialize profile: {e}"))?;
-    std::fs::write(&path, raw).map_err(|e| format!("write {}: {e}", path.display()))?;
+    crate::storage::write_atomic(&path, raw.as_bytes()).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(path)
 }
 
@@ -143,9 +146,6 @@ pub fn unique_stem(dir: &Path, stem: &str) -> String {
             return cand;
         }
         n += 1;
-        if n > 999 {
-            return format!("{stem} {n}");
-        }
     }
 }
 
@@ -164,6 +164,24 @@ pub fn match_process(dir: &Path, exe: &str) -> Option<ProfileEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_names_that_escape_the_profile_directory() {
+        let dir = std::env::temp_dir().join("cc-invalid-profile-name");
+        for stem in ["", "../outside", "..\\outside", "C:\\outside", "name:stream", ".hidden", "name."] {
+            assert!(save(&dir, stem, &sample()).is_err(), "accepted {stem:?}");
+        }
+    }
+
+    #[test]
+    fn accepts_bom_prefixed_profiles() {
+        let dir = tmp("bom");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bom.json");
+        std::fs::write(&path, "\u{feff}{}").unwrap();
+        assert!(load(&path).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("cc_prof_{name}"));

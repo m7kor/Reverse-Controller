@@ -485,6 +485,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "interactive desktop test: moves the real pointer; run explicitly with --ignored"]
     fn test_send_input_mouse() {
         crate::platform::attach_to_interactive_desktop();
         let mut pt_before = POINT::default();

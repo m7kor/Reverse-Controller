@@ -425,17 +425,24 @@ impl Default for Config {
 impl Config {
     pub fn try_load(path: &std::path::Path) -> Result<Config, String> {
         if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("amgp")) {
-            return crate::amgp::load_amgp_file(path);
+            let config = crate::amgp::load_amgp_file(path)?;
+            config.validate()?;
+            return Ok(config);
         }
         let text = std::fs::read_to_string(path)
             .map_err(|error| format!("read {}: {error}", path.display()))?;
         let clean_text = text.strip_prefix('\u{feff}').unwrap_or(&text);
         match serde_json::from_str(clean_text) {
-            Ok(config) => Ok(config),
+            Ok(config) => {
+                let config: Config = config;
+                config.validate()?;
+                Ok(config)
+            },
             Err(error) => {
                 // Older imports can contain the original XML under a .json name.
                 if text.contains("<gamecontroller") {
                     if let Ok(config) = crate::amgp::parse_amgp_xml(&text) {
+                        config.validate()?;
                         return Ok(config);
                     }
                 }
@@ -455,11 +462,40 @@ impl Config {
     }
 
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+        self.validate().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let text = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        crate::storage::write_atomic(path, &text)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.toggle_hotkey.trim().is_empty() && parse_hotkey(&self.toggle_hotkey).is_none() {
+            return Err("toggle_hotkey must be empty or a valid chord such as Ctrl+K".into());
         }
-        let text = serde_json::to_string_pretty(self).expect("serialize config");
-        std::fs::write(path, text)
+        let m = &self.mouse;
+        for (name, value, max) in [
+            ("speed", m.speed, 100000.0), ("acceleration", m.acceleration, 100000.0),
+            ("speed_x", m.speed_x, 100000.0), ("speed_y", m.speed_y, 100000.0),
+            ("wheel_speed", m.wheel_speed, 100000.0), ("wheel_speed_x", m.wheel_speed_x, 100000.0),
+            ("wheel_speed_y", m.wheel_speed_y, 100000.0),
+            ("acceleration_threshold", m.acceleration_threshold, 1.0),
+            ("modifier_zone", m.modifier_zone, 32767.0), ("max_zone", m.max_zone, 32767.0),
+            ("altsnap_zone", m.altsnap_zone, 32767.0), ("diagonal_range", m.diagonal_range, 100.0),
+            ("altsnap_speed", m.altsnap_speed, 1.0), ("sniper_scale", m.sniper_scale, 1.0),
+        ] {
+            if !value.is_finite() || !(0.0..=max).contains(&value) {
+                return Err(format!("mouse.{name} must be finite and between 0 and {max}"));
+            }
+        }
+        if !self.keyboard.scale.is_finite() || !(0.5..=3.0).contains(&self.keyboard.scale) {
+            return Err("keyboard.scale must be between 0.5 and 3".into());
+        }
+        if self.controller.controller_index > 3 {
+            return Err("controller.controller_index must be between 0 and 3".into());
+        }
+        if self.controller.left_stick_dead_zone > 32767 || self.controller.right_stick_dead_zone > 32767 {
+            return Err("controller dead zones must be between 0 and 32767".into());
+        }
+        Ok(())
     }
 }
 
@@ -497,6 +533,30 @@ mod tests {
     use super::*;
     use crate::actions::Action;
     use crate::bindings::Input;
+
+    #[test]
+    fn rejects_invalid_numeric_settings_before_saving() {
+        let mut cfg = Config::default();
+        assert!(cfg.validate().is_ok());
+        cfg.mouse.speed = f32::NAN;
+        assert!(cfg.validate().unwrap_err().contains("speed"));
+        cfg.mouse.speed = -1.0;
+        assert!(cfg.validate().is_err());
+        cfg.mouse.speed = 1100.0;
+        cfg.controller.controller_index = 4;
+        assert!(cfg.validate().unwrap_err().contains("controller_index"));
+        cfg.controller.controller_index = 0;
+        cfg.keyboard.scale = 0.0;
+        assert!(cfg.validate().unwrap_err().contains("scale"));
+    }
+
+    #[test]
+    fn configuration_rejects_invalid_recovery_hotkey_but_allows_disabling_it() {
+        let mut cfg = Config { toggle_hotkey: "Hyper+K".into(), ..Config::default() };
+        assert!(cfg.validate().unwrap_err().contains("toggle_hotkey"));
+        cfg.toggle_hotkey.clear();
+        assert!(cfg.validate().is_ok());
+    }
 
     #[test]
     fn config_json_roundtrip() {

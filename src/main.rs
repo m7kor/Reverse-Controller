@@ -15,6 +15,8 @@ pub mod amgp;
 pub mod arabic;
 mod bindings;
 mod config;
+#[cfg(feature = "gui")]
+mod calibration;
 mod engine;
 #[cfg(feature = "gui")]
 mod gui;
@@ -25,6 +27,7 @@ mod platform;
 pub mod predict;
 mod profiles;
 mod runtime_status;
+mod storage;
 pub mod sound;
 mod tray;
 mod vknav;
@@ -50,6 +53,7 @@ fn print_usage() {
          --write-default   Write the default config file (with default bindings) and exit\n  \
          --print-default   Print the default binding table as JSON and exit\n  \
          --status          Print XInput controller status and exit\n  \
+         --validate-config Validate the selected config without starting input\n  \
          --help            Show this help\n"
     );
 }
@@ -85,6 +89,7 @@ fn main() {
     let mut write_default = false;
     let mut print_default = false;
     let mut status_only = false;
+    let mut validate_config = false;
     let mut stdin_exit = false;
     #[cfg(feature = "gui")]
     let mut demo_kb = false;
@@ -105,6 +110,7 @@ fn main() {
             "--write-default" => write_default = true,
             "--print-default" => print_default = true,
             "--status" => status_only = true,
+            "--validate-config" => validate_config = true,
             "--stdin-exit" => stdin_exit = true,
             "--caret-probe" => {
                 // Diagnostics: sample the caret heuristic for a few seconds.
@@ -187,6 +193,9 @@ fn main() {
                 i += 1;
                 if let Some(p) = args.get(i) {
                     config_path = std::path::PathBuf::from(p);
+                } else {
+                    eprintln!("--config requires a file path");
+                    std::process::exit(2);
                 }
             }
             "--settings" => open_standalone_settings = true,
@@ -216,6 +225,13 @@ fn main() {
     }
 
     // Automatic Administrator elevation: if not elevated, relaunch elevated via UAC immediately!
+    if validate_config {
+        match Config::try_load(&config_path) {
+            Ok(_) => println!("Configuration is valid: {}", config_path.display()),
+            Err(error) => { eprintln!("{error}"); std::process::exit(2); }
+        }
+        return;
+    }
     let is_cli_helper = status_only || print_default || write_default;
     if !elevated && !no_elevate && !is_cli_helper {
         println!("[main] Elevating process to run as Administrator...");
@@ -226,7 +242,7 @@ fn main() {
 
     // Ensure Windows built-in XAML/UWP gamepad navigation hijacking is disabled
     // so mouse control is always 100% active in Windows Settings, Start Menu, etc.
-    platform::disable_windows_gamepad_navigation();
+    if !is_cli_helper { platform::disable_windows_gamepad_navigation(); }
 
     if open_standalone_settings {
         #[cfg(feature = "gui")]
@@ -284,9 +300,6 @@ fn main() {
         return;
     }
 
-    // Terminate any previous instance so that a newly launched (or elevated) instance takes over cleanly
-    platform::kill_other_instances();
-
     // Single-instance enforcement: prevent duplicate background instances
     let (mut instance_mutex, mut already_running) = win32::create_named_mutex("Local\\ControllerCompanionRust_InstanceLock");
     if already_running {
@@ -306,7 +319,15 @@ fn main() {
         return;
     }
 
-    let config = Config::load(&config_path);
+    let config = if config_path.exists() {
+        Config::try_load(&config_path).unwrap_or_else(|error| {
+            platform::log_debug(&format!("[main] Startup stopped: {error}"));
+            eprintln!("{error}");
+            std::process::exit(2);
+        })
+    } else {
+        Config::default()
+    };
     println!("[main] config: {}", config_path.display());
     println!(
         "[main] mouse speed={} accel={} wheel={} | deadzones L={} R={} | enabled={}",

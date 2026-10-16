@@ -3,7 +3,7 @@
 //! and without requiring online cloud services. Fully supports Arabic (Saudi Arabia) and English!
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,13 @@ static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 
 /// True when running Whisper inference.
 static IS_TRANSCRIBING: AtomicBool = AtomicBool::new(false);
+// UI and VAD can stop the same recording at the same time.
+static RECORDING_TRANSITION: Mutex<()> = Mutex::new(());
+static RECORDING_SESSION: AtomicU64 = AtomicU64::new(0);
+
+fn session_matches(expected: Option<u64>, current: u64) -> bool {
+    expected.is_none_or(|id| id == current)
+}
 
 /// Status message for UI feedback.
 static STATUS_MSG: Mutex<Option<String>> = Mutex::new(None);
@@ -43,7 +50,6 @@ static TARGET_HWND: AtomicUsize = AtomicUsize::new(0);
 static HAD_SPEECH: AtomicBool = AtomicBool::new(false);
 static LAST_SPEECH_INSTANT: Mutex<Option<Instant>> = Mutex::new(None);
 static RECORD_START_INSTANT: Mutex<Option<Instant>> = Mutex::new(None);
-static VAD_LANG_AR: AtomicBool = AtomicBool::new(false);
 
 pub fn is_recording() -> bool {
     IS_RECORDING.load(Ordering::SeqCst)
@@ -308,10 +314,9 @@ pub fn inject_voice_text(text: &str) {
     // 2. Keep text in Windows clipboard as backup
     let copied = set_clipboard_text(&processed.text);
     crate::platform::log_debug(&format!(
-        "[voice] Direct injection of {} chars into fg={target} (clipboard={copied}, auto_send={}): {}",
+        "[voice] Direct injection of {} chars into fg={target} (clipboard={copied}, auto_send={})",
         processed.text.chars().count(),
-        processed.auto_send,
-        processed.text
+        processed.auto_send
     ));
 
     // 3. Audio & Haptic confirmation
@@ -333,8 +338,15 @@ pub fn inject_voice_text(text: &str) {
 
 /// Start recording audio from the default microphone with real-time VAD.
 pub fn start_recording(lang_ar: bool) -> Result<(), String> {
+    let _transition = RECORDING_TRANSITION.lock().map_err(|_| "Recording state unavailable")?;
+    if is_transcribing() {
+        return Err("Wait for the current transcription to finish".into());
+    }
     if is_recording() {
         return Ok(());
+    }
+    if model_path().is_none() {
+        return Err("Install ggml-base.bin or ggml-tiny.bin in %APPDATA%\\ControllerCompanionRust\\models before recording".into());
     }
 
     // Play listening chime and subtle haptic pulse
@@ -344,7 +356,6 @@ pub fn start_recording(lang_ar: bool) -> Result<(), String> {
     // Save target window before keyboard or UI steals focus
     let fg = crate::platform::push_foreground();
     TARGET_HWND.store(fg, Ordering::SeqCst);
-    VAD_LANG_AR.store(lang_ar, Ordering::SeqCst);
 
     let host = cpal::default_host();
     let device = host
@@ -459,9 +470,8 @@ pub fn start_recording(lang_ar: bool) -> Result<(), String> {
     stream
         .play()
         .map_err(|e| format!("Failed to start recording stream: {e}"))?;
-    if let Ok(mut stream_lock) = ACTIVE_STREAM.lock() {
-        *stream_lock = Some(stream);
-    }
+    *ACTIVE_STREAM.lock().map_err(|_| "Audio stream state unavailable")? = Some(stream);
+    let session = RECORDING_SESSION.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
     IS_RECORDING.store(true, Ordering::SeqCst);
     if let Ok(mut msg) = STATUS_MSG.lock() {
         *msg = Some(format!("🎙 {dev_name} (Listening...)"));
@@ -472,9 +482,9 @@ pub fn start_recording(lang_ar: bool) -> Result<(), String> {
 
     // VAD Auto-Stop Monitor thread: Automatically stops and injects when user pauses
     std::thread::spawn(move || {
-        while is_recording() {
+        while is_recording() && session_matches(Some(session), RECORDING_SESSION.load(Ordering::SeqCst)) {
             std::thread::sleep(Duration::from_millis(50));
-            if !is_recording() {
+            if !is_recording() || !session_matches(Some(session), RECORDING_SESSION.load(Ordering::SeqCst)) {
                 break;
             }
 
@@ -485,9 +495,9 @@ pub fn start_recording(lang_ar: bool) -> Result<(), String> {
             if had_speech {
                 let last = LAST_SPEECH_INSTANT.lock().ok().and_then(|t| *t);
                 if let Some(last_time) = last {
-                    if now.duration_since(last_time) >= Duration::from_millis(750) {
+                    if now.saturating_duration_since(last_time) >= Duration::from_millis(750) {
                         crate::platform::log_debug("[voice] VAD: 750ms silence after speech -> auto-stopping & sending text");
-                        stop_and_transcribe(VAD_LANG_AR.load(Ordering::SeqCst));
+                        stop_session(lang_ar, Some(session));
                         break;
                     }
                 }
@@ -496,9 +506,9 @@ pub fn start_recording(lang_ar: bool) -> Result<(), String> {
             // 2. Safety max recording duration: 25 seconds
             let start = RECORD_START_INSTANT.lock().ok().and_then(|t| *t);
             if let Some(start_time) = start {
-                if now.duration_since(start_time) >= Duration::from_secs(25) {
+                if now.saturating_duration_since(start_time) >= Duration::from_secs(25) {
                     crate::platform::log_debug("[voice] Max recording duration (25s) reached -> auto-stopping");
-                    stop_and_transcribe(VAD_LANG_AR.load(Ordering::SeqCst));
+                    stop_session(lang_ar, Some(session));
                     break;
                 }
             }
@@ -510,7 +520,12 @@ pub fn start_recording(lang_ar: bool) -> Result<(), String> {
 
 /// Stop recording and kick off Whisper transcription on a background worker thread.
 pub fn stop_and_transcribe(lang_ar: bool) {
-    if !is_recording() {
+    stop_session(lang_ar, None);
+}
+
+fn stop_session(lang_ar: bool, expected_session: Option<u64>) {
+    let Ok(_transition) = RECORDING_TRANSITION.lock() else { return; };
+    if !is_recording() || !session_matches(expected_session, RECORDING_SESSION.load(Ordering::SeqCst)) {
         return;
     }
 
@@ -547,7 +562,6 @@ pub fn stop_and_transcribe(lang_ar: bool) {
         let t0 = Instant::now();
         let result = process_and_transcribe(samples, channels, sample_rate, lang_ar);
         let elapsed = t0.elapsed();
-        IS_TRANSCRIBING.store(false, Ordering::SeqCst);
         touch_voice_activity();
 
         match result {
@@ -555,7 +569,7 @@ pub fn stop_and_transcribe(lang_ar: bool) {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     crate::platform::log_debug(&format!(
-                        "[voice] Transcribed in {:.2}s: {trimmed}",
+                        "[voice] Transcription completed in {:.2}s",
                         elapsed.as_secs_f32()
                     ));
                     if let Ok(mut last) = LAST_TRANSCRIBED.lock() {
@@ -583,6 +597,7 @@ pub fn stop_and_transcribe(lang_ar: bool) {
                 }
             }
         }
+        IS_TRANSCRIBING.store(false, Ordering::SeqCst);
         crate::platform::trim_working_set();
     });
 }
@@ -602,12 +617,13 @@ pub fn toggle_voice_typing(lang_ar: bool) {
 
 /// Resample incoming audio from any rate and channel count to 16,000 Hz mono f32.
 fn resample_to_16k_mono(samples: &[f32], channels: u16, sample_rate: u32) -> Vec<f32> {
-    if samples.is_empty() {
+    if samples.is_empty() || channels == 0 || sample_rate == 0 {
         return Vec::new();
     }
 
     let ch = channels.max(1) as usize;
     let mono_len = samples.len() / ch;
+    if mono_len == 0 { return Vec::new(); }
     let mut mono = Vec::with_capacity(mono_len);
     for frame in samples.chunks_exact(ch) {
         let sum: f32 = frame.iter().sum();
@@ -693,6 +709,29 @@ fn process_and_transcribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_monitor_cannot_stop_a_new_recording() {
+        assert!(session_matches(Some(7), 7));
+        assert!(!session_matches(Some(7), 8));
+        assert!(session_matches(None, 8));
+    }
+
+    #[test]
+    fn resampling_rejects_invalid_formats_and_incomplete_frames() {
+        assert!(resample_to_16k_mono(&[0.5], 2, 48000).is_empty());
+        assert!(resample_to_16k_mono(&[0.5], 1, 0).is_empty());
+        assert!(resample_to_16k_mono(&[0.5], 0, 16000).is_empty());
+        assert!(resample_to_16k_mono(&[], 1, 16000).is_empty());
+    }
+
+    #[test]
+    fn resampling_downmixes_stereo_and_preserves_duration() {
+        assert_eq!(resample_to_16k_mono(&[1.0, -1.0, 0.5, 0.5], 2, 16000), vec![0.0, 0.5]);
+        let mono = resample_to_16k_mono(&vec![0.25; 48000], 1, 48000);
+        assert_eq!(mono.len(), 16000);
+        assert!(mono.iter().all(|&sample| (sample - 0.25).abs() < f32::EPSILON));
+    }
 
     #[test]
     fn test_voice_macros_arabic_send() {

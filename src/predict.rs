@@ -56,16 +56,17 @@ fn normalize_ar(c: char) -> Option<char> {
 /// Find top matching word predictions for a given prefix.
 pub fn predict<'a>(prefix: &str, is_arabic: bool, max_results: usize) -> Vec<&'a str> {
     let trimmed = prefix.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || max_results == 0 {
         return Vec::new();
     }
 
     let mut matches = Vec::new();
     if is_arabic {
         let norm_prefix: String = trimmed.chars().filter_map(normalize_ar).collect();
+        if norm_prefix.is_empty() { return matches; }
         for &w in AR_WORDS {
             let norm_w: String = w.chars().filter_map(normalize_ar).collect();
-            if norm_w.starts_with(&norm_prefix) && w != trimmed {
+            if norm_w.starts_with(&norm_prefix) && w != trimmed && !matches.contains(&w) {
                 matches.push(w);
                 if matches.len() >= max_results {
                     break;
@@ -90,6 +91,14 @@ pub fn predict<'a>(prefix: &str, is_arabic: bool, max_results: usize) -> Vec<&'a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn predictions_respect_zero_limit_and_ignore_bare_diacritics() {
+        assert!(predict("th", false, 0).is_empty());
+        assert!(predict("َ", true, 3).is_empty());
+        let results = predict("تط", true, 20);
+        assert_eq!(results.iter().filter(|&&word| word == "تطبيق").count(), 1);
+    }
 
     #[test]
     fn predicts_english_words() {

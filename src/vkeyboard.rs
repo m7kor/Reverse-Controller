@@ -203,6 +203,7 @@ pub enum Layer {
     Abc,
     Num,
     Emoji,
+    Edit,
 }
 
 /// Shift is tri-state, like the Windows touch keyboard.
@@ -274,6 +275,9 @@ enum Act {
     Copy,
     Cut,
     Undo,
+    Redo,
+    DeleteWord,
+    EditTools,
     SelectAll,
     VoiceDictation,
     TaskView,
@@ -391,7 +395,7 @@ fn bottom_row(lang: Lang, on_num: bool) -> Vec<KDef> {
         KDef::spec("Alt", Act::Alt, 1.0),
         KDef::spec(space_label, Act::Space, 4.6),
         KDef::spec("AltGr", Act::AltGr, 1.0),
-        KDef::spec("", Act::Hints, 1.0).with_glyph(Glyph::Pad),
+        KDef::spec("Edit", Act::EditTools, 1.0),
         KDef { shifted: Some("?"), ..KDef::spec(".", Act::Char('.', Some('?')), 1.0) },
         KDef::spec("\u{23CE}", Act::Enter, 1.35).with_glyph(Glyph::Enter),
     ]
@@ -667,10 +671,30 @@ fn build_layout(lang: Lang, layer: Layer) -> Vec<Vec<KDef>> {
         (Lang::Ar, Layer::Abc) => ar_abc(),
         (lang, Layer::Num) => num_layer(lang),
         (_, Layer::Emoji) => emoji_layer(0),
+        (lang, Layer::Edit) => editing_layer(lang),
     };
     let target = layout_units(&rows);
     align_rows(&mut rows, target);
     rows
+}
+
+fn editing_layer(lang: Lang) -> Vec<Vec<KDef>> {
+    let ar = lang == Lang::Ar;
+    let key = |en, arabic, act| KDef::spec(if ar { arabic } else { en }, act, 3.5);
+    vec![
+        vec![key("Copy", "نسخ", Act::Copy), key("Paste", "لصق", Act::Paste), key("Cut", "قص", Act::Cut), key("Select all", "تحديد الكل", Act::SelectAll)],
+        vec![key("Undo", "تراجع", Act::Undo), key("Redo", "إعادة", Act::Redo), key("Delete word", "حذف كلمة", Act::DeleteWord), key("Delete", "حذف", Act::Key(NavKey::Delete))],
+        vec![key("Home", "بداية السطر", Act::Key(NavKey::Home)), key("Left", "يسار", Act::Key(NavKey::Left)), key("Right", "يمين", Act::Key(NavKey::Right)), key("End", "نهاية السطر", Act::Key(NavKey::End))],
+        vec![key("Shift", "Shift", Act::Shift), key("Up", "أعلى", Act::Key(NavKey::Up)), key("Down", "أسفل", Act::Key(NavKey::Down)), key("Backspace", "مسح للخلف", Act::Backspace)],
+        vec![key("ABC", "حروف", Act::EditTools), key("Space", "مسافة", Act::Space), key("Help", "مساعدة", Act::Hints).with_glyph(Glyph::Pad), key("Enter", "إدخال", Act::Enter)],
+    ]
+}
+
+/// Only the trailing word belongs to the prediction context. Arabic punctuation
+/// is a boundary; combining marks and the lam-alef sequence remain part of it.
+fn trailing_word(text: &str) -> String {
+    text.chars().rev().take_while(|c| c.is_alphabetic() || *c == '\'' || ('\u{064B}'..='\u{065F}').contains(c))
+        .collect::<String>().chars().rev().collect()
 }
 
 /// Width (in units) of the widest row.
@@ -840,6 +864,7 @@ struct VKbdApp {
     mode: OverlayMode,
     typed_word: String,
     typed_buffer: String,
+    typing_target: usize,
     toolbar_focused: bool,
     toolbar_col: usize,
     last_predictions_count: usize,
@@ -903,6 +928,7 @@ impl VKbdApp {
             mode: OverlayMode::Keyboard,
             typed_word: String::new(),
             typed_buffer: String::new(),
+            typing_target: 0,
             toolbar_focused: false,
             toolbar_col: 0,
             last_predictions_count: 0,
@@ -1058,29 +1084,35 @@ impl VKbdApp {
     }
 
     fn execute_action(&mut self, act: Act) {
+        // These actions can change the selection or caret in ways the local
+        // preview cannot observe. Never reuse their old prediction prefix.
+        if matches!(act, Act::Key(_) | Act::WinKey | Act::Cut | Act::Undo | Act::Redo | Act::DeleteWord | Act::SelectAll | Act::Paste | Act::TaskView | Act::ShowDesktop | Act::CloseActiveWindow)
+            || ((self.ctrl || self.alt || self.altgr) && matches!(act, Act::Char(..) | Act::Backspace | Act::Space | Act::Str(_))) {
+            self.typed_word.clear();
+            self.typed_buffer.clear();
+        }
+        let shortcut = self.ctrl || self.alt || self.altgr;
         match act {
             Act::Char(c, shifted) => {
                 let ch = resolve_char(c, shifted, self.shift.on(), self.caps);
                 self.type_char(ch);
-                self.typed_buffer.push(ch);
-                if ch.is_alphabetic() || ch == '\'' || ('\u{0600}'..='\u{06FF}').contains(&ch) {
-                    self.typed_word.push(ch);
-                } else {
-                    self.typed_word.clear();
+                if !shortcut {
+                    self.typed_buffer.push(ch);
+                    self.typed_word = trailing_word(&self.typed_buffer);
                 }
             }
             Act::Str(s) => {
                 self.key.send_str(s);
                 self.release_oneshots();
                 self.typed_buffer.push_str(s);
-                self.typed_word.clear();
+                self.typed_word = trailing_word(&self.typed_buffer);
             }
             Act::Key(k) => self.tap_key(k),
             Act::WinKey => self.tap_key(NavKey::LWin),
             Act::Backspace => {
                 self.tap_key(NavKey::Backspace);
                 self.typed_buffer.pop();
-                self.typed_word.pop();
+                self.typed_word = trailing_word(&self.typed_buffer);
             }
             Act::Enter => {
                 self.tap_key(NavKey::Enter);
@@ -1121,17 +1153,12 @@ impl VKbdApp {
                     Layer::Abc => Layer::Num,
                     Layer::Num => Layer::Abc,
                     Layer::Emoji => Layer::Abc,
+                    Layer::Edit => Layer::Abc,
                 };
                 self.dirty = true;
             }
             Act::Close => self.hide(),
             Act::Paste => {
-                if let Some(text) = crate::platform::get_clipboard_text() {
-                    let clean = text.trim();
-                    if !clean.is_empty() {
-                        self.typed_buffer.push_str(clean);
-                    }
-                }
                 self.key.down(NavKey::LControl);
                 self.key.down(NavKey::V);
                 self.key.up(NavKey::V);
@@ -1160,6 +1187,18 @@ impl VKbdApp {
                 self.key.up(NavKey::Z);
                 self.key.up(NavKey::LControl);
                 self.release_oneshots();
+            }
+            Act::Redo | Act::DeleteWord => {
+                let key = if act == Act::Redo { NavKey::Y } else { NavKey::Backspace };
+                self.key.down(NavKey::LControl);
+                self.key.tap(key);
+                self.key.up(NavKey::LControl);
+                self.release_oneshots();
+            }
+            Act::EditTools => {
+                self.layer = if self.layer == Layer::Edit { Layer::Abc } else { Layer::Edit };
+                self.dirty = true;
+                self.repeat = None;
             }
             Act::SelectAll => {
                 self.key.down(NavKey::LControl);
@@ -1212,6 +1251,8 @@ impl VKbdApp {
                 self.typed_word.clear();
             }
             Act::AcceptPrediction(word) => {
+                if self.typed_word.is_empty() || !crate::predict::predict(&self.typed_word, self.lang == Lang::Ar, 3).contains(&word) { return; }
+                self.release_oneshots();
                 let count = self.typed_word.chars().count();
                 for _ in 0..count {
                     self.tap_key(NavKey::Backspace);
@@ -1294,6 +1335,9 @@ impl VKbdApp {
                 | Act::Copy
                 | Act::Cut
                 | Act::Undo
+                | Act::Redo
+                | Act::DeleteWord
+                | Act::ClearTyped
                 | Act::SelectAll
                 | Act::VoiceDictation
                 | Act::TaskView
@@ -1306,10 +1350,21 @@ impl VKbdApp {
             if cur == 0 || cur == platform::overlay_hwnd() {
                 platform::restore_foreground();
             }
+            self.sync_typing_target(platform::foreground_hwnd());
         }
         self.execute_action(act);
         if TRACE.load(Ordering::Relaxed) {
             eprintln!("[vkeyboard] key {act:?} -> fg={}", platform::foreground_hwnd());
+        }
+    }
+
+    fn sync_typing_target(&mut self, target: usize) {
+        if target == 0 || target == platform::overlay_hwnd() { return; }
+        if self.typing_target != target {
+            self.typed_word.clear();
+            self.typed_buffer.clear();
+            self.repeat = None;
+            self.typing_target = target;
         }
     }
 
@@ -1495,6 +1550,7 @@ impl VKbdApp {
                 Layer::Abc => Layer::Num,
                 Layer::Num => Layer::Abc,
                 Layer::Emoji => Layer::Abc,
+                Layer::Edit => Layer::Abc,
             };
             self.dirty = true;
         }
@@ -1686,6 +1742,7 @@ impl VKbdApp {
 
 impl eframe::App for VKbdApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_typing_target(platform::foreground_hwnd());
         self.frame = self.frame.wrapping_add(1);
         if self.frame <= 3 {
             crate::platform::log_debug(&format!(
@@ -2878,6 +2935,7 @@ fn paint_chrome(ui: &mut egui::Ui, area: egui::Rect, st: &ChromeStatus) -> Chrom
         (Lang::En, Layer::Num) => "EN · 123",
         (Lang::Ar, Layer::Num) => "ع · 123",
         (_, Layer::Emoji) => "😊 EMOJI",
+        (_, Layer::Edit) => "EDIT · تحرير",
     };
     let reshaped_mode = if st.lang == Lang::Ar {
         crate::arabic::reshape_ar(mode_tag)
@@ -3443,6 +3501,54 @@ pub fn install_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arabic_prediction_context_handles_ligatures_marks_and_punctuation() {
+        assert_eq!(trailing_word("مرحبا لا"), "لا");
+        assert_eq!(trailing_word("كَتَبَ"), "كَتَبَ");
+        assert_eq!(trailing_word("مرحبا،"), "");
+        assert_eq!(trailing_word("مرحبا؟"), "");
+        assert_eq!(trailing_word("hello wor"), "wor");
+        assert_eq!(trailing_word("hello "), "");
+        let mut text = "hello ".to_string();
+        text.pop();
+        assert_eq!(trailing_word(&text), "hello");
+    }
+
+    #[test]
+    fn editing_layout_exposes_tools_in_both_languages_and_fits() {
+        for lang in [Lang::En, Lang::Ar] {
+            let rows = build_layout(lang, Layer::Edit);
+            assert_eq!(rows.len(), 5);
+            let actions: Vec<_> = rows.iter().flatten().map(|key| key.act).collect();
+            for act in [Act::Copy, Act::Paste, Act::Cut, Act::Undo, Act::Redo, Act::DeleteWord, Act::SelectAll, Act::EditTools] {
+                assert!(actions.contains(&act), "missing {act:?}");
+            }
+            let (width, height) = layout_px(&rows);
+            assert!(width <= BASE_W && height <= BASE_H);
+            let sizes = widths(&rows);
+            assert!(sizes.iter().all(|size| (*size - sizes[0]).abs() < 0.001));
+            assert!(!repeatable(Act::DeleteWord));
+            assert!(build_layout(lang, Layer::Abc).iter().flatten().any(|key| key.act == Act::EditTools));
+        }
+    }
+
+    #[test]
+    fn switching_target_discards_old_predictions_and_preview() {
+        let mut app = VKbdApp::new(Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(VkNav::default())), Lang::En, false, crate::config::KeyboardPrefs::default());
+        app.typing_target = 10;
+        app.typed_word = "hel".into();
+        app.typed_buffer = "hel".into();
+        app.sync_typing_target(10);
+        assert_eq!(app.typed_word, "hel");
+        app.sync_typing_target(11);
+        assert!(app.typed_word.is_empty());
+        assert!(app.typed_buffer.is_empty());
+        app.execute_action(Act::EditTools);
+        assert_eq!(app.layer, Layer::Edit);
+        app.execute_action(Act::EditTools);
+        assert_eq!(app.layer, Layer::Abc);
+    }
 
     const ALL: [(Lang, Layer); 4] = [
         (Lang::En, Layer::Abc),

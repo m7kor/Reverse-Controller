@@ -269,6 +269,8 @@ struct SettingsApp {
     /// Set while the hotkey text box holds something that cannot be parsed.
     hotkey_error: bool,
     page: SettingsPage,
+    calibration: Option<(Instant, crate::calibration::RestCalibration)>,
+    calibration_result: Option<(u32, [u16; 2])>,
     runtime_status: Option<crate::runtime_status::RuntimeStatus>,
     last_status_check: Instant,
     last_status_seen: Instant,
@@ -300,6 +302,8 @@ impl SettingsApp {
             new_profile_processes: String::new(),
             hotkey_error: false,
             page: SettingsPage::Overview,
+            calibration: None,
+            calibration_result: None,
             runtime_status: None,
             last_status_check: Instant::now() - Duration::from_secs(1),
             last_status_seen: Instant::now() - Duration::from_secs(10),
@@ -477,7 +481,7 @@ impl eframe::App for SettingsApp {
                 let name = &e.config().active_profile;
                 let controller_index = self.runtime_status.as_ref()
                     .map(|snapshot| snapshot.controller_index)
-                    .unwrap_or(e.config().controller.controller_index);
+                    .unwrap_or(self.working.controller.controller_index);
                 (
                     e.is_connected(),
                     e.is_enabled(),
@@ -498,6 +502,22 @@ impl eframe::App for SettingsApp {
             .map(|s| s.active_profile.as_str())
             .unwrap_or(&local_profile);
         let runtime_mode = live.map(|s| s.mode);
+        let calibration_slot = live.map_or(self.working.controller.controller_index, |s| s.controller_index);
+        if self.calibration_result.is_some_and(|(slot, _)| slot != calibration_slot) || gp_state.is_none() {
+            self.calibration_result = None;
+        }
+        if let Some((started, calibration)) = &mut self.calibration {
+            let axes = gp_state.map(|p| [p.sThumbLX, p.sThumbLY, p.sThumbRX, p.sThumbRY]);
+            match calibration.observe(started.elapsed(), calibration_slot, axes) {
+                Ok(Some(result)) => {
+                    self.calibration_result = Some((calibration_slot, result));
+                    self.calibration = None;
+                    self.status = "Calibration complete. Review the suggested dead zones on the Pointer page.".into();
+                }
+                Err(error) => { self.status = error.into(); self.calibration = None; }
+                Ok(None) => {}
+            }
+        }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -905,8 +925,44 @@ impl eframe::App for SettingsApp {
 
                 // Mouse
                 if self.page == SettingsPage::Pointer {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Movement presets:");
+                    for (label, speed, acceleration) in [
+                        ("Precision", 450.0, 200.0),
+                        ("Balanced", 1100.0, 800.0),
+                        ("Large display", 1800.0, 1200.0),
+                    ] {
+                        if ui.button(label).clicked() {
+                            let m = &mut self.working.mouse;
+                            m.speed = speed;
+                            m.acceleration = acceleration;
+                            m.speed_x = 0.0;
+                            m.speed_y = 0.0;
+                            m.altsnap_enabled = false;
+                            m.diagonal_range = 0.0;
+                            self.status = format!("{label} preset ready. Save to apply.");
+                        }
+                    }
+                });
                 ui.group(|ui| {
                     ui.label(egui::RichText::new("Live stick calibration").strong());
+                    ui.label("Rest calibration: release both sticks for 4 seconds. Settings stay unchanged until you apply and save.");
+                    if let Some((started, _)) = &self.calibration {
+                        ui.add(egui::ProgressBar::new((started.elapsed().as_secs_f32() / 4.0).min(1.0)).text("Keep both sticks released"));
+                        if ui.button("Cancel calibration").clicked() { self.calibration = None; }
+                    } else if ui.add_enabled(gp_state.is_some(), egui::Button::new("Measure stick drift")).clicked() {
+                        self.calibration_result = None;
+                        self.calibration = Some((Instant::now(), crate::calibration::RestCalibration::new(calibration_slot)));
+                    }
+                    if let Some((_, [left, right])) = self.calibration_result {
+                        ui.label(format!("Suggested dead zones: left {left}, right {right}"));
+                        if ui.button("Use suggested dead zones").clicked() {
+                            self.working.controller.left_stick_dead_zone = left;
+                            self.working.controller.right_stick_dead_zone = right;
+                            self.calibration_result = None;
+                            self.status = "Calibrated dead zones ready. Save to apply.".into();
+                        }
+                    }
                     ui.label("Move each stick. The amber ring is its dead zone; green means movement is registered.");
                     if let Some(pad) = gp_state {
                         ui.horizontal(|ui| {

@@ -1,11 +1,21 @@
 # 🎮 Reverse Controller (Controller Companion — Native Rust Edition)
 
+## الجديد في v1.2.0 — Keyboard & Reliability
+
+- **لوحة تحرير للكيبورد بالعربية والإنجليزية:** زر **Edit** يفتح النسخ واللصق والقص، التراجع والإعادة، تحديد الكل، حذف كلمة، والأسهم وHome/End. اضغط **ABC / حروف** للعودة.
+- **كتابة عربية أفضل:** تحسين اقتراحات «لا» والتشكيل والترقيم، وإلغاء الاقتراحات القديمة عند تغيير النافذة أو تحريك مؤشر الكتابة عبر الكيبورد.
+- **معايرة العصا:** قياس الانحراف خلال أربع ثوانٍ واقتراح مناطق الخمول، مع أنماط Precision وBalanced وLarge display.
+- **موثوقية أعلى:** حفظ آمن، التحقق من الإعدادات، تحسين الاستعادة عند انقطاع اليد، وعزل جلسات التسجيل الصوتي.
+- **اختبارات:** 126 اختبارًا للنسخة الكاملة و86 دون واجهة؛ اختبار المؤشر التفاعلي منفصل. تجربة الأجهزة الفعلية ما زالت مطلوبة.
+
+**[تحميل آخر إصدار](https://github.com/m7kor/Reverse-Controller/releases/latest)** · **[ملاحظات v1.2.0](docs/releases/v1.2.0.md)**
+
+> دليل الكيبورد الحالي: **A** لاختيار المفتاح، **X** للمسح، **Y** للمسافة، **LB/RB** لتحريك مؤشر الكتابة، **LT** للرموز، **RT** لـShift، **Back** لتبديل اللغة، و**R3** لتحريك نافذة الكيبورد. استخدم زر **?** لعرض المساعدة.
+
 [![Rust](https://img.shields.io/badge/Rust-2021%20Edition-orange?logo=rust)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-blue?logo=windows)](https://microsoft.com/windows)
 [![Release](https://img.shields.io/github/v/release/m7kor/Reverse-Controller?color=blue&logo=github)](https://github.com/m7kor/Reverse-Controller/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Memory Footprint](https://img.shields.io/badge/RAM-~31%20MB-brightgreen)]()
-[![Idle GPU](https://img.shields.io/badge/GPU%20Idle-0.00%25-brightgreen)]()
 
 A high-performance, ultra-lightweight native **Rust** re-engineering of the Windows desktop controller utility **Controller Companion**. It seamlessly transforms your Xbox/XInput controller into a mouse and keyboard with Windows 11 Fluent Acrylic visuals, full native Arabic keyboard support, and 100% offline AI voice dictation.
 
@@ -16,9 +26,9 @@ A high-performance, ultra-lightweight native **Rust** re-engineering of the Wind
 ## ✨ Features (المميزات الرئيسية)
 
 - ⚡ **Ultra-Lightweight & Efficient (استهلاك فائق الخفة للموارد):**
-  - **~31 MB RAM** in background idle (vs ~242 MB in legacy .NET - أكثر من 87% توفير للذاكرة).
-  - **0.00% GPU utilization** when overlays are hidden using smart event-driven sleeping loops.
-  - Zero background latency: wakes up instantly (**0 ms**) on demand.
+  - Background resource use depends on enabled features and the loaded voice model; measurements are pending.
+  - Overlays reduce repainting while hidden.
+  - Controller input is polled; response time depends on polling and system scheduling.
 - 🎯 **Pixel-Perfect Stick Physics & AltSnap:**
   - Independent deadzones, non-linear acceleration curves, and sub-pixel fractional leftovers.
   - Diagonal 8-way snapping and 4-way vertical scroll locking.
@@ -178,6 +188,8 @@ A high-performance, ultra-lightweight native **Rust** re-engineering of the Wind
 ### Prerequisites
 - Windows 10 أو Windows 11 (x64)
 - [Rust toolchain (stable MSVC)](https://rustup.rs/)
+- Visual Studio C++ Build Tools, Windows SDK, CMake, and LLVM/libclang for the default voice build.
+- Offline dictation needs a multilingual `ggml-base.bin` or `ggml-tiny.bin` model in `%APPDATA%\ControllerCompanionRust\models`.
 
 ```powershell
 # استنساخ المستودع
@@ -191,10 +203,35 @@ cargo build --release --features "gui,voice"
 `target/release/controller-companion.exe`
 
 ### تشغيل الاختبارات البرمجية (Run Tests)
-للتحقق من سلامة كافة الاختبارات البرمجية الـ 109:
+لتشغيل الاختبارات البرمجية:
 ```powershell
 cargo test --features "gui,voice"
 ```
+
+Run `powershell -File scripts/check.ps1` for full-feature tests, headless tests,
+and strict static analysis. Use `-WithoutVoice` when voice build tools are unavailable.
+The interactive pointer test is excluded by default; run it explicitly with
+`cargo test --all-features test_send_input_mouse -- --ignored` on an interactive desktop.
+
+### Diagnostics and movement presets
+
+- Virtual keyboard: choose **Edit** in the bottom row for a controller-accessible
+  editing panel (Copy, Paste, Cut, Select all, Undo, Redo, Delete word, Delete,
+  Home/End and arrows). Choose **ABC / حروف** to return. Labels follow the
+  keyboard language. Redo sends Ctrl+Y; Delete word sends Ctrl+Backspace, with
+  behavior determined by the target application.
+- Arabic predictions retain lam-alef and diacritics, and stop at Arabic punctuation.
+  Moving the caret with keyboard actions or switching foreground windows clears
+  the old prediction context. The local preview is not a full mirror of the target text field.
+
+- Settings → Pointer offers **Precision**, **Balanced**, and **Large display** presets. Save to apply.
+- **Measure stick drift** guides a four-second rest calibration. Release both sticks;
+  review the proposed dead zones, choose **Use suggested dead zones**, then Save.
+  Disconnection, controller-slot changes, excessive movement, or too few samples
+  cancel the measurement without changing your settings.
+- `controller-companion.exe --config path\config.json --validate-config` checks syntax and numeric ranges without starting controller input; invalid files return exit code 2.
+- `controller-companion.exe --status` reports all four XInput slots without changing Windows gamepad navigation settings.
+- Configuration and profile saves replace the destination only after the complete new file is written. Failed replacement leaves the previous file intact.
 
 ---
 
@@ -221,16 +258,9 @@ cargo test --features "gui,voice"
 
 ---
 
-## 📊 مقارنة الأداء: Reverse Controller (Rust) مقابل النسخة القديمة (.NET)
+## Performance verification
 
-| معيار المقارنة (Metric) | النسخة القديمة الأصلية (Legacy .NET 4.5) | مشروعنا المطور (Reverse Controller - Rust) | الفارق التقني |
-| :--- | :---: | :---: | :---: |
-| **استهلاك الذاكرة العشوائية (RAM)** | ~240 MB+ | **~31 MB** | **توفير أكثر من 87% من الذاكرة** |
-| **استهلاك كرت الشاشة (Idle GPU)** | ~0.6% مستمر | **0.00% (Event Sleeping Loop)** | **انعدام تام لاستهلاك كرت الشاشة في الخمول** |
-| **زمن الإقلاع والتشغيل** | ~1.8 ثانية | **~0.08 ثانية** | **إقلاع فوري وخفيف** |
-| **دعم الكيبورد العربي** | غير مدعوم / حروف مقطعة ومشوهة | **دعم كامل أصيل مع التشكيل والحركات والتشبيك** | **تجربة كتابة عربية كاملة** |
-| **الإملاء الصوتي بالذكاء الاصطناعي** | غير موجود | **مدمج محلياً 100% أوفلاين (Whisper AI)** | **خصوصية تامة بدون إنترنت** |
-| **الاعتماديات والمتطلبات** | حزم .NET Framework و WPF | **ملف تنفيذي واحد مستقل بدون أي برامج مساعدة** | **حجم خفيف وتوافقية مطلقة** |
+RAM, GPU usage, startup time, and input latency have not been benchmarked reproducibly for this revision. Earlier numerical comparisons should not be treated as release guarantees. See [review and acceptance checks](docs/REVIEW_2026-10-16.md).
 
 ---
 

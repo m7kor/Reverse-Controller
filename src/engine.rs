@@ -709,6 +709,10 @@ impl Engine {
                         }
                     }
                     if let Some((new_slot, g)) = found {
+                        // A replacement pad must not inherit held inputs or a
+                        // recovery chord from the controller that disappeared.
+                        self.release_all_if_needed();
+                        self.toggle_chord_down = false;
                         self.config.controller.controller_index = new_slot;
                         idx = new_slot;
                         if !self.was_connected {
@@ -735,6 +739,7 @@ impl Engine {
                             self.xinput.stop_all_vibration();
                         }
                         self.release_all_if_needed();
+                        self.toggle_chord_down = false;
                         return;
                     }
                 }

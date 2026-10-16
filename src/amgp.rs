@@ -24,13 +24,7 @@ pub fn load_amgp_file(path: &Path) -> Result<Config, String> {
 /// profile instead of being re-parsed on every load.
 pub fn convert_amgp_file(input: &Path, output: &Path) -> Result<(), String> {
     let cfg = load_amgp_file(input)?;
-    let json = serde_json::to_string_pretty(&cfg)
-        .map_err(|e| format!("Failed to serialise config: {e}"))?;
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
-    }
-    std::fs::write(output, json)
+    cfg.save(output)
         .map_err(|e| format!("Failed to write {}: {e}", output.display()))
 }
 
