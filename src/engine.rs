@@ -344,6 +344,7 @@ pub struct Engine {
     toggle_chord_down: bool,
     nav_grid_active: bool,
     nav_mouse_down: bool,
+    last_cursor_pos: Option<(i32, i32)>,
     was_fullscreen_paused: bool,
 }
 
@@ -405,6 +406,7 @@ impl Engine {
             toggle_chord_down: false,
             nav_grid_active: false,
             nav_mouse_down: false,
+            last_cursor_pos: None,
             was_fullscreen_paused: false,
         };
         eng.rebuild_bindings();
@@ -889,9 +891,12 @@ impl Engine {
                 self.current_mods = 0;
                 self.next_mods = 0;
                 self.nav_active = true;
+                self.nav_grid_active = false;
+                self.last_cursor_pos = crate::win32::get_cursor_pos();
                 if let Some(nav_arc) = &self.vk_nav {
                     if let Ok(mut nav) = nav_arc.lock() {
                         nav.clear_close_and_hide();
+                        nav.grid_nav_active = false;
                     }
                 }
                 self.nav_prev_buttons = buttons;
@@ -1164,13 +1169,23 @@ impl Engine {
         let b = gp.wButtons;
         let newly = b & !self.nav_prev_buttons;
 
-        // Direction from D-pad arrows vs Mouse stick motion
+        let cur_pos = crate::win32::get_cursor_pos();
+        let physical_mouse_moved = match (cur_pos, self.last_cursor_pos) {
+            (Some(cur), Some(prev)) => (cur.0 - prev.0).abs() > 1 || (cur.1 - prev.1).abs() > 1,
+            _ => false,
+        };
+        if cur_pos.is_some() {
+            self.last_cursor_pos = cur_pos;
+        }
+
+        // Direction from D-pad arrows vs Mouse stick motion or physical mouse movement
         let dpad_moving = (b & (B_DPAD_RIGHT | B_DPAD_LEFT | B_DPAD_DOWN | B_DPAD_UP)) != 0;
-        const MOUSE_STICK_DEADZONE: i32 = 7500;
+        const MOUSE_STICK_DEADZONE: i32 = 4000;
         let mouse_moving = (gp.sThumbLX as i32).abs() > MOUSE_STICK_DEADZONE
             || (gp.sThumbLY as i32).abs() > MOUSE_STICK_DEADZONE
             || (gp.sThumbRX as i32).abs() > MOUSE_STICK_DEADZONE
-            || (gp.sThumbRY as i32).abs() > MOUSE_STICK_DEADZONE;
+            || (gp.sThumbRY as i32).abs() > MOUSE_STICK_DEADZONE
+            || physical_mouse_moved;
 
         if dpad_moving {
             self.nav_grid_active = true;
@@ -1263,6 +1278,11 @@ impl Engine {
                 if step_r {
                     nav.rx += rdx;
                     nav.ry += rdy;
+                }
+                // Two-way sync: if GUI or pointer interaction set grid_nav_active to false,
+                // and user is not actively pressing D-pad, sync Engine state to false!
+                if !nav.grid_nav_active && !dpad_moving {
+                    self.nav_grid_active = false;
                 }
                 nav.grid_nav_active = self.nav_grid_active;
                 // Face buttons, mapped from the original `GetKeyboardModeBindings`:

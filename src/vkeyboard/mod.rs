@@ -819,10 +819,10 @@ impl VKbdApp {
             Ok(mut g) => g.drain(),
             Err(_) => return false,
         };
-        if n.dx != 0 || n.dy != 0 || n.jump_y != 0 {
+        if n.dx != 0 || n.dy != 0 || n.jump_y != 0 || n.rx != 0 || n.ry != 0 {
             self.grid_nav_active = true;
-        } else {
-            self.grid_nav_active = n.grid_nav_active;
+        } else if !n.grid_nav_active {
+            self.grid_nav_active = false;
         }
 
         if self.demo {
@@ -885,7 +885,7 @@ impl VKbdApp {
                 self.toolbar_focused = false;
                 self.cursor = (0, nearest_col(&self.rows[0], self.goal_x));
             }
-            if n.select > 0 {
+            if n.select > 0 && self.grid_nav_active {
                 self.activate_toolbar_focused();
             }
         } else if r == 0 && (n.dy < 0 || n.jump_y < 0) {
@@ -944,14 +944,14 @@ impl VKbdApp {
                 self.left_cursor = (lr, lc);
                 self.right_cursor = (rr, rc);
 
-                if n.select_left > 0 {
+                if n.select_left > 0 && self.grid_nav_active {
                     if let Some(kd) = self.rows.get(lr).and_then(|row| row.get(lc)) {
                         let a = kd.act;
                         self.flash = Some(((lr, lc), Instant::now()));
                         self.perform_in_context(a);
                     }
                 }
-                if n.select_right > 0 {
+                if n.select_right > 0 && self.grid_nav_active {
                     if let Some(kd) = self.rows.get(rr).and_then(|row| row.get(rc)) {
                         let a = kd.act;
                         self.flash = Some(((rr, rc), Instant::now()));
@@ -970,7 +970,7 @@ impl VKbdApp {
                     c = nearest_col(&self.rows[r], self.goal_x);
                 }
 
-                if n.select > 0 {
+                if n.select > 0 && self.grid_nav_active {
                     let (fr, fc) = (r, c);
                     if let Some(kd) = self.rows.get(fr).and_then(|row| row.get(fc)) {
                         let a = kd.act;
@@ -1054,7 +1054,8 @@ impl eframe::App for VKbdApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_typing_target(platform::foreground_hwnd());
         let pointer_delta = ctx.input(|i| i.pointer.delta().length());
-        if pointer_delta > 1.5 {
+        let pointer_down = ctx.input(|i| i.pointer.primary_pressed() || i.pointer.primary_down() || i.pointer.any_pressed() || i.pointer.any_down());
+        if pointer_delta > 0.2 || pointer_down {
             self.grid_nav_active = false;
             if let Ok(mut g) = self.nav.lock() {
                 g.grid_nav_active = false;
@@ -1324,6 +1325,13 @@ impl eframe::App for VKbdApp {
                     self.hide();
                     return;
                 }
+                if chrome.help || chrome.radial || chrome.drag.dragged() || chrome.drag.clicked() {
+                    self.grid_nav_active = false;
+                    if let Ok(mut g) = self.nav.lock() {
+                        g.grid_nav_active = false;
+                        g.select = 0;
+                    }
+                }
                 if chrome.help {
                     self.hints = !self.hints;
                 }
@@ -1347,6 +1355,11 @@ impl eframe::App for VKbdApp {
                     self.toolbar_col,
                 );
                 if let Some(action) = tb_event.action {
+                    self.grid_nav_active = false;
+                    if let Ok(mut g) = self.nav.lock() {
+                        g.grid_nav_active = false;
+                        g.select = 0;
+                    }
                     self.perform_in_context(action);
                 }
 
@@ -1380,6 +1393,10 @@ impl eframe::App for VKbdApp {
                         };
                         let ev = paint_key(ui, egui::Id::new((ri, ci)), rect, &kv);
 
+                        if ev.hovered && !self.grid_nav_active {
+                            self.cursor = (ri, ci);
+                            self.goal_x = key_center(&self.rows[ri], ci);
+                        }
                         if ev.down_now {
                             pressed_key = Some((ri, ci, kd.act));
                         }
@@ -1423,7 +1440,13 @@ impl eframe::App for VKbdApp {
         }
 
         if let Some((r, c, act)) = pressed_key {
+            self.grid_nav_active = false;
+            if let Ok(mut g) = self.nav.lock() {
+                g.grid_nav_active = false;
+                g.select = 0;
+            }
             self.set_cursor(r, c);
+            self.flash = Some(((r, c), now));
             pending.push(act);
             self.repeat = if repeatable(act) && mouse_down {
                 Some(Repeat { pos: (r, c), act, next: now + REPEAT_DELAY })

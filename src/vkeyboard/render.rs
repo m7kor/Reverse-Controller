@@ -201,6 +201,7 @@ pub struct KeyView<'a> {
 }
 
 pub struct KeyEvent {
+    pub hovered: bool,
     pub down_now: bool,
     #[allow(dead_code)]
     pub clicked: bool,
@@ -431,7 +432,12 @@ pub fn paint_key(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect, v: &KeyView)
         );
     }
 
-    KeyEvent { down_now, clicked, held }
+    KeyEvent {
+        hovered,
+        down_now,
+        clicked,
+        held,
+    }
 }
 
 pub fn draw_spacebar(p: &egui::Painter, rect: egui::Rect, label: &str, col: egui::Color32) {
