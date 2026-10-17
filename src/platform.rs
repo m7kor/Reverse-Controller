@@ -753,6 +753,11 @@ pub fn is_fullscreen() -> bool {
             return false;
         }
 
+        let ov = overlay_hwnd() as HWND;
+        if !ov.is_null() && w == ov {
+            return false;
+        }
+
         // Ignore desktop background, taskbar shells, Start Menu, Settings, and UWP app frames
         let mut class_buf = [0u16; 64];
         let class_len = GetClassNameW(w, class_buf.as_mut_ptr(), class_buf.len() as i32);
@@ -803,10 +808,11 @@ pub fn is_fullscreen() -> bool {
             return false;
         }
         let m = mi.rcMonitor;
-        (rc.right - rc.left) == (m.right - m.left)
-            && (rc.bottom - rc.top) == (m.bottom - m.top)
-            && rc.top == m.top
-            && rc.left == m.left
+        const TOLERANCE: i32 = 12;
+        (rc.left <= m.left + TOLERANCE)
+            && (rc.top <= m.top + TOLERANCE)
+            && (rc.right >= m.right - TOLERANCE)
+            && (rc.bottom >= m.bottom - TOLERANCE)
     }
 }
 
@@ -1364,19 +1370,23 @@ extern "system" {
     fn SHQueryUserNotificationState(pquns: *mut i32) -> i32;
 }
 
+const QUNS_BUSY: i32 = 2;
 const QUNS_RUNNING_D3D_FULL_SCREEN: i32 = 3;
+const QUNS_APP: i32 = 7;
 
 fn compute_fullscreen() -> bool {
-    // Method 1: Exclusive D3D fullscreen (SHQueryUserNotificationState).
+    // Method 1: Exclusive D3D or Modern DirectX / Vulkan / Store full-screen app
+    // (SHQueryUserNotificationState).
     let d3d_fs = unsafe {
         let mut state: i32 = 0;
-        SHQueryUserNotificationState(&mut state) == 0 && state == QUNS_RUNNING_D3D_FULL_SCREEN
+        SHQueryUserNotificationState(&mut state) == 0
+            && (state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_APP || state == QUNS_BUSY)
     };
     if d3d_fs {
         return true;
     }
     // Method 2: Borderless fullscreen — the foreground window covers its entire
-    // monitor.  This catches the majority of modern games that use borderless
+    // monitor. This catches the majority of modern games that use borderless
     // windowed mode rather than exclusive fullscreen.
     is_fullscreen()
 }

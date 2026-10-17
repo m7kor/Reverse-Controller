@@ -358,6 +358,20 @@ impl VKbdApp {
         crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
         crate::engine::trigger_haptic(7500, 9500, 0.022);
         let mods = self.armed_mods();
+        if !mods.is_empty() {
+            if let Some(vk) = layout::char_to_nav_key(ch) {
+                for m in &mods {
+                    self.key.down(*m);
+                }
+                self.key.down(vk);
+                self.key.up(vk);
+                for m in mods.iter().rev() {
+                    self.key.up(*m);
+                }
+                self.release_oneshots();
+                return;
+            }
+        }
         for m in &mods {
             self.key.down(*m);
         }
@@ -400,10 +414,16 @@ impl VKbdApp {
                 }
             }
             Act::Str(s) => {
-                self.key.send_str(s);
-                self.release_oneshots();
-                self.typed_buffer.push_str(s);
-                self.typed_word = trailing_word(&self.typed_buffer);
+                let mods = self.armed_mods();
+                if !mods.is_empty() && (s == "لا" || s == "لآ") {
+                    self.tap_key(NavKey::B);
+                } else {
+                    let out = if self.shift.on() && s == "لا" { "لآ" } else { s };
+                    self.key.send_str(out);
+                    self.release_oneshots();
+                    self.typed_buffer.push_str(out);
+                    self.typed_word = trailing_word(&self.typed_buffer);
+                }
             }
             Act::Key(k) => self.tap_key(k),
             Act::WinKey => self.tap_key(NavKey::LWin),
@@ -446,11 +466,26 @@ impl VKbdApp {
                 self.typed_word.clear();
             }
             Act::Shift => self.tap_shift(),
-            Act::Ctrl => self.ctrl = !self.ctrl,
-            Act::Alt => self.alt = !self.alt,
-            Act::AltGr => self.altgr = !self.altgr,
-            Act::Caps => self.caps = !self.caps,
-            Act::Hints => self.hints = !self.hints,
+            Act::Ctrl => {
+                self.ctrl = !self.ctrl;
+                self.dirty = true;
+            }
+            Act::Alt => {
+                self.alt = !self.alt;
+                self.dirty = true;
+            }
+            Act::AltGr => {
+                self.altgr = !self.altgr;
+                self.dirty = true;
+            }
+            Act::Caps => {
+                self.caps = !self.caps;
+                self.dirty = true;
+            }
+            Act::Hints => {
+                self.hints = !self.hints;
+                self.dirty = true;
+            }
             Act::Lang => {
                 self.lang = match self.lang {
                     Lang::En => Lang::Ar,
@@ -673,9 +708,6 @@ impl VKbdApp {
             for p in preds {
                 acts.push(Act::AcceptPrediction(intern(p)));
             }
-            acts.push(Act::Enter);
-        } else if has_clear {
-            acts.push(Act::Enter);
         }
         acts.push(Act::Copy);
         acts.push(Act::Paste);
@@ -1359,7 +1391,7 @@ impl eframe::App for VKbdApp {
                     y += KEY_H + ROW_GAP;
                 }
 
-                if self.hints && paint_hints(ui, area) {
+                if self.hints && paint_hints(ui, area, self.lang) {
                     self.hints = false;
                 }
             });
@@ -1672,7 +1704,7 @@ mod tests {
         let rows = layout::en_abc();
         let bottom = rows.last().unwrap();
         let acts: Vec<Act> = bottom.iter().map(|k| k.act).collect();
-        for needed in [Act::Lang, Act::ToggleLayer, Act::Space, Act::ShiftEnter, Act::WinKey, Act::AltGr] {
+        for needed in [Act::Lang, Act::ToggleLayer, Act::Space, Act::Ctrl, Act::WinKey, Act::AltGr] {
             assert!(acts.contains(&needed), "bottom row is missing {needed:?}");
         }
     }
@@ -1707,7 +1739,7 @@ mod tests {
                 assert!(top.contains(d), "{lang:?} ?123 row is missing {d}");
             }
             assert!(rows[4].iter().any(|k| k.act == Act::Space));
-            assert!(rows[4].iter().any(|k| k.act == Act::ShiftEnter));
+            assert!(rows[4].iter().any(|k| k.act == Act::Ctrl));
         }
     }
 

@@ -60,6 +60,7 @@ pub enum Glyph {
     Win,
     Pad,
     Enter,
+    #[allow(dead_code)]
     ShiftEnter,
     Backspace,
 }
@@ -114,7 +115,7 @@ pub enum Act {
 
 /// Keys that auto-repeat while held.
 pub fn repeatable(act: Act) -> bool {
-    matches!(act, Act::Char(..) | Act::Backspace | Act::Space)
+    matches!(act, Act::Char(..) | Act::Str(..) | Act::Backspace | Act::Space)
 }
 
 #[derive(Clone, Copy)]
@@ -181,8 +182,17 @@ impl KDef {
         Self::new(ch_str(c), Act::Char(c, None))
     }
     /// Arabic letter: big Arabic glyph + small Latin/digit in the corner.
+    #[allow(dead_code)]
     pub fn ar(arabic: char, corner: char) -> Self {
         Self { alt: Some(ch_str(corner)), ..Self::new(ch_str(arabic), Act::Char(arabic, None)) }
+    }
+    /// Arabic letter with shift variant: big Arabic glyph + shifted variant + small Latin in corner.
+    pub fn ar_shift(arabic: char, shifted: char, corner: char) -> Self {
+        Self {
+            alt: Some(ch_str(corner)),
+            shifted: Some(ch_str(shifted)),
+            ..Self::new(ch_str(arabic), Act::Char(arabic, Some(shifted)))
+        }
     }
     /// Arabic letter that emits the ligature "لا".
     pub fn ar_ligature(corner: char) -> Self {
@@ -204,20 +214,15 @@ pub fn bottom_row(lang: Lang, on_num: bool) -> Vec<KDef> {
         Lang::Ar => ("\u{0639} / EN", "\u{0645}\u{0633}\u{0627}\u{0641}\u{0629}"), // مسافة
     };
     let layer_label = if on_num { "abc" } else { "?123" };
-    let newline_label = if lang == Lang::Ar {
-        "\u{21B5} \u{0633}\u{0637}\u{0631} \u{062c}\u{062f}\u{064a}\u{062f}" // ↵ سطر جديد
-    } else {
-        "\u{21B5} New Line"
-    };
     vec![
         KDef::spec(layer_label, Act::ToggleLayer, 1.35),
         KDef::spec("Ctrl", Act::Ctrl, 1.2),
         KDef::spec("", Act::WinKey, 1.2).with_glyph(Glyph::Win),
         KDef::spec("Alt", Act::Alt, 1.2),
-        KDef::spec(space_label, Act::Space, 5.0),
+        KDef::spec(space_label, Act::Space, 5.25),
         KDef::spec("AltGr", Act::AltGr, 1.2),
         KDef::spec(lang_label, Act::Lang, 1.5),
-        KDef::spec(newline_label, Act::ShiftEnter, 2.5).with_glyph(Glyph::ShiftEnter),
+        KDef::spec("Ctrl", Act::Ctrl, 1.35),
     ]
 }
 
@@ -419,58 +424,74 @@ pub fn ar_abc() -> Vec<Vec<KDef>> {
     ];
     let r2 = {
         let mut v = vec![KDef::spec("Tab", Act::Tab, 1.5)];
-        for (a, l) in [
-            ('\u{0636}', 'q'), // ض
-            ('\u{0635}', 'w'), // ص
-            ('\u{062B}', 'e'), // ث
-            ('\u{0642}', 'r'), // ق
-            ('\u{0641}', 't'), // ف
-            ('\u{063A}', 'y'), // غ
-            ('\u{0639}', 'u'), // ع
-            ('\u{0647}', 'i'), // ه
-            ('\u{062E}', 'o'), // خ
-            ('\u{062D}', 'p'), // ح
-            ('\u{062C}', '['), // ج
-            ('\u{062F}', ']'), // د
+        for (a, s, l) in [
+            ('\u{0636}', '\u{064E}', 'q'), // ض -> َ (Fatha)
+            ('\u{0635}', '\u{064B}', 'w'), // ص -> ً (Tanwin Fath)
+            ('\u{062B}', '\u{064F}', 'e'), // ث -> ُ (Damma)
+            ('\u{0642}', '\u{064C}', 'r'), // ق -> ٌ (Tanwin Damm)
         ] {
-            v.push(KDef::ar(a, l));
+            v.push(KDef::ar_shift(a, s, l));
+        }
+        v.push(KDef::ar_shift('\u{0641}', '\u{FEF9}', 't')); // ف -> لإ
+        for (a, s, l) in [
+            ('\u{063A}', '\u{0625}', 'y'), // غ -> إ
+            ('\u{0639}', '‘', 'u'),         // ع -> ‘
+            ('\u{0647}', '÷', 'i'),         // ه -> ÷
+            ('\u{062E}', '×', 'o'),         // خ -> ×
+            ('\u{062D}', '\u{061B}', 'p'), // ح -> ؛
+            ('\u{062C}', '<', '['),         // ج -> <
+            ('\u{062F}', '>', ']'),         // د -> >
+        ] {
+            v.push(KDef::ar_shift(a, s, l));
         }
         v.push(KDef::shiftable('\\', '|'));
         v
     };
     let r3 = {
         let mut v = vec![KDef::spec("Caps", Act::Caps, 1.75)];
-        for (a, l) in [
-            ('\u{0634}', 'a'), // ش
-            ('\u{0633}', 's'), // س
-            ('\u{064A}', 'd'), // ي
-            ('\u{0628}', 'f'), // ب
-            ('\u{0644}', 'g'), // ل
-            ('\u{0627}', 'h'), // ا
-            ('\u{062A}', 'j'), // ت
-            ('\u{0646}', 'k'), // ن
-            ('\u{0645}', 'l'), // م
-            ('\u{0643}', ';'), // ك
-            ('\u{0637}', '\''), // ط
+        for (a, s, l) in [
+            ('\u{0634}', '\u{0650}', 'a'), // ش -> ِ (Kasra)
+            ('\u{0633}', '\u{064D}', 's'), // س -> ٍ (Tanwin Kasr)
+            ('\u{064A}', ']', 'd'),         // ي -> ]
+            ('\u{0628}', '[', 'f'),         // ب -> [
         ] {
-            v.push(KDef::ar(a, l));
+            v.push(KDef::ar_shift(a, s, l));
+        }
+        v.push(KDef::ar_shift('\u{0644}', '\u{FEF7}', 'g')); // ل -> لأ
+        for (a, s, l) in [
+            ('\u{0627}', '\u{0623}', 'h'), // ا -> أ
+            ('\u{062A}', '\u{0640}', 'j'), // ت -> ـ (Tatweel)
+            ('\u{0646}', '\u{060C}', 'k'), // ن -> ، (Arabic comma)
+            ('\u{0645}', '/', 'l'),         // م -> /
+            ('\u{0643}', ':', ';'),         // ك -> :
+            ('\u{0637}', '"', '\''),        // ط -> "
+        ] {
+            v.push(KDef::ar_shift(a, s, l));
         }
         v.push(KDef::spec("\u{23CE}", Act::Enter, 2.2).with_glyph(Glyph::Enter));
         v
     };
     let r4 = {
         let mut v = vec![KDef::spec("Shift", Act::Shift, 2.25)];
-        v.push(KDef::ar('\u{0630}', '`')); // ذ
-        v.push(KDef::ar('\u{0626}', 'z')); // ئ
-        v.push(KDef::ar('\u{0621}', 'x')); // ء
-        v.push(KDef::ar('\u{0624}', 'c')); // ؤ
-        v.push(KDef::ar('\u{0631}', 'v')); // ر
-        v.push(KDef::ar_ligature('b'));     // لا
-        v.push(KDef::ar('\u{0649}', 'n')); // ى
-        v.push(KDef::ar('\u{0629}', 'm')); // ة
-        v.push(KDef::ar('\u{0648}', ',')); // و
-        v.push(KDef::ar('\u{0632}', '.')); // ز
-        v.push(KDef::ar('\u{0638}', '/')); // ظ
+        for (a, s, l) in [
+            ('\u{0630}', '\u{0651}', '`'), // ذ -> ّ (Shadda)
+            ('\u{0626}', '~', 'z'),         // ئ -> ~
+            ('\u{0621}', '\u{0652}', 'x'), // ء -> ْ (Sukun)
+            ('\u{0624}', '}', 'c'),         // ؤ -> }
+            ('\u{0631}', '{', 'v'),         // ر -> {
+        ] {
+            v.push(KDef::ar_shift(a, s, l));
+        }
+        v.push(KDef { shifted: Some("لآ"), ..KDef::ar_ligature('b') }); // لا -> لآ
+        for (a, s, l) in [
+            ('\u{0649}', '\u{0622}', 'n'), // ى -> آ (Alif with Madda)
+            ('\u{0629}', '\'', 'm'),        // ة -> '
+            ('\u{0648}', ',', ','),         // و -> ,
+            ('\u{0632}', '.', '.'),         // ز -> .
+            ('\u{0638}', '\u{061F}', '/'), // ظ -> ؟ (Arabic question mark)
+        ] {
+            v.push(KDef::ar_shift(a, s, l));
+        }
         v.push(KDef::spec("Shift", Act::Shift, 2.75));
         v
     };
@@ -570,7 +591,7 @@ pub fn widths(rows: &[Vec<KDef>]) -> Vec<f32> {
 
 pub fn resolve_char(base: char, shifted: Option<char>, shift: bool, caps: bool) -> char {
     match shifted {
-        Some(s) if base.is_alphabetic() => {
+        Some(s) if base.is_ascii_alphabetic() => {
             if shift ^ caps {
                 s
             } else {
@@ -584,7 +605,7 @@ pub fn resolve_char(base: char, shifted: Option<char>, shift: bool, caps: bool) 
 
 pub fn shown_label(kd: &KDef, shift: bool, caps: bool) -> &'static str {
     match (kd.act, kd.shifted) {
-        (Act::Char(c, Some(_)), Some(s)) if c.is_alphabetic() => {
+        (Act::Char(c, Some(_)), Some(s)) if c.is_ascii_alphabetic() => {
             if shift ^ caps {
                 s
             } else {
@@ -598,4 +619,60 @@ pub fn shown_label(kd: &KDef, shift: bool, caps: bool) -> &'static str {
 
 pub fn shown_alt(kd: &KDef, _shift: bool) -> Option<&'static str> {
     kd.alt
+}
+
+/// Map any Latin or Arabic character directly to its physical Windows virtual key.
+/// This allows shortcuts (Ctrl+C, Ctrl+V, Ctrl+A, Ctrl+Z, etc.) to trigger native
+/// system commands properly regardless of whether English or Arabic layout is active.
+pub fn char_to_nav_key(c: char) -> Option<NavKey> {
+    match c {
+        'a' | 'A' | '\u{0634}' => Some(NavKey::A), // ش
+        'b' | 'B' => Some(NavKey::B),              // لا
+        'c' | 'C' | '\u{0624}' => Some(NavKey::C), // ؤ
+        'd' | 'D' | '\u{064A}' => Some(NavKey::D), // ي
+        'e' | 'E' | '\u{062B}' => Some(NavKey::E), // ث
+        'f' | 'F' | '\u{0628}' => Some(NavKey::F), // ب
+        'g' | 'G' | '\u{0644}' => Some(NavKey::G), // ل
+        'h' | 'H' | '\u{0627}' => Some(NavKey::H), // ا
+        'i' | 'I' | '\u{0647}' => Some(NavKey::I), // ه
+        'j' | 'J' | '\u{062A}' => Some(NavKey::J), // ت
+        'k' | 'K' | '\u{0646}' => Some(NavKey::K), // ن
+        'l' | 'L' | '\u{0645}' => Some(NavKey::L), // م
+        'm' | 'M' | '\u{0629}' => Some(NavKey::M), // ة
+        'n' | 'N' | '\u{0649}' => Some(NavKey::N), // ى
+        'o' | 'O' | '\u{062E}' => Some(NavKey::O), // خ
+        'p' | 'P' | '\u{062D}' => Some(NavKey::P), // ح
+        'q' | 'Q' | '\u{0636}' => Some(NavKey::Q), // ض
+        'r' | 'R' | '\u{0642}' => Some(NavKey::R), // ق
+        's' | 'S' | '\u{0633}' => Some(NavKey::S), // س
+        't' | 'T' | '\u{0641}' => Some(NavKey::T), // ف
+        'u' | 'U' | '\u{0639}' => Some(NavKey::U), // ع
+        'v' | 'V' | '\u{0631}' => Some(NavKey::V), // ر
+        'w' | 'W' | '\u{0635}' => Some(NavKey::W), // ص
+        'x' | 'X' | '\u{0621}' => Some(NavKey::X), // ء
+        'y' | 'Y' | '\u{063A}' => Some(NavKey::Y), // غ
+        'z' | 'Z' | '\u{0626}' => Some(NavKey::Z), // ئ
+        '0' => Some(NavKey::D0),
+        '1' => Some(NavKey::D1),
+        '2' => Some(NavKey::D2),
+        '3' => Some(NavKey::D3),
+        '4' => Some(NavKey::D4),
+        '5' => Some(NavKey::D5),
+        '6' => Some(NavKey::D6),
+        '7' => Some(NavKey::D7),
+        '8' => Some(NavKey::D8),
+        '9' => Some(NavKey::D9),
+        '`' | '~' | '\u{0630}' => Some(NavKey::Oemtilde),        // ذ
+        ';' | ':' | '\u{0643}' => Some(NavKey::OemSemicolon),    // ك
+        '\'' | '"' | '\u{0637}' => Some(NavKey::OemQuotes),     // ط
+        ',' | '<' | '\u{0648}' => Some(NavKey::OemComma),       // و
+        '.' | '>' | '\u{0632}' => Some(NavKey::OemPeriod),      // ز
+        '/' | '?' | '\u{0638}' => Some(NavKey::OemQuestion),    // ظ
+        '[' | '{' | '\u{062C}' => Some(NavKey::OemOpenBrackets), // ج
+        ']' | '}' | '\u{062F}' => Some(NavKey::OemCloseBrackets),// د
+        '\\' | '|' => Some(NavKey::OemPipe),
+        '-' | '_' => Some(NavKey::OemMinus),
+        '=' | '+' => Some(NavKey::OemPlus),
+        _ => None,
+    }
 }

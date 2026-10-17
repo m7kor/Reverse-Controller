@@ -344,6 +344,7 @@ pub struct Engine {
     toggle_chord_down: bool,
     nav_grid_active: bool,
     nav_mouse_down: bool,
+    was_fullscreen_paused: bool,
 }
 
 static PENDING_RUMBLE: Mutex<Option<(u16, u16, f64)>> = Mutex::new(None);
@@ -404,6 +405,7 @@ impl Engine {
             toggle_chord_down: false,
             nav_grid_active: false,
             nav_mouse_down: false,
+            was_fullscreen_paused: false,
         };
         eng.rebuild_bindings();
         eng
@@ -810,9 +812,26 @@ impl Engine {
             return;
         }
         // Fullscreen auto-disable (port of FullScreenLoopDisabler).
+        // Automatically pauses desktop bindings and returns the gamepad to its native
+        // controller behavior when a fullscreen game/app is in focus.
         if self.config.disable_in_fullscreen && crate::platform::is_fullscreen_cached() {
+            if !self.was_fullscreen_paused {
+                self.was_fullscreen_paused = true;
+                crate::platform::log_debug("[engine] Fullscreen game detected -> desktop control paused (native gamepad mode)");
+                #[cfg(feature = "gui")]
+                if let Some(f) = &self.vk_visible {
+                    f.store(false, Ordering::SeqCst);
+                }
+                if self.nav_mouse_down {
+                    mouse::button_up(mouse::MouseButton::Left);
+                    self.nav_mouse_down = false;
+                }
+            }
             self.release_all_if_needed();
             return;
+        } else if self.was_fullscreen_paused {
+            self.was_fullscreen_paused = false;
+            crate::platform::log_debug("[engine] Fullscreen game exited -> desktop control resumed");
         }
 
         let (lx, ly) = shape_stick(

@@ -44,6 +44,22 @@ pub const HINTS: &[(&str, &str)] = &[
     ("B / L3", "Close keyboard"),
 ];
 
+pub const HINTS_AR: &[(&str, &str)] = &[
+    ("الأسهم / عصا التحكم", "التنقل بين الأزرار"),
+    ("أعلى من الصف 0", "الإجراءات السريعة واقتراحات الكلمات"),
+    ("L1 / R1 (LB / RB)", "تحريك مؤشر الكتابة ◄ / ►"),
+    ("R2 (RT)", "التبديل إلى الحروف الكبيرة / الرموز (Shift)"),
+    ("L2 (LT)", "الأرقام والرموز (#+=)"),
+    ("R3 (ضغط العصا)", "تحريك موضع الكيبورد بحرية"),
+    ("A", "الضغط على الزر المحدد"),
+    ("X / Y", "مسح (Backspace) / مسافة (Space)"),
+    ("RT + X / RT + Y", "حذف كلمة / اختيار الاقتراح الأول"),
+    ("Start", "إدخال (Enter)"),
+    ("RT + Start", "سطر جديد (Shift + Enter)"),
+    ("Back (Select)", "تبديل اللغة (ع / EN)"),
+    ("B / L3", "إغلاق الكيبورد"),
+];
+
 pub struct ChromeStatus {
     pub lang: Lang,
     pub layer: Layer,
@@ -526,7 +542,7 @@ pub fn draw_backspace(p: &egui::Painter, rect: egui::Rect, col: egui::Color32) {
     p.line_segment([egui::pos2(xc - r, c.y + r), egui::pos2(xc + r, c.y - r)], stroke);
 }
 
-pub fn paint_hints(ui: &mut egui::Ui, area: egui::Rect) -> bool {
+pub fn paint_hints(ui: &mut egui::Ui, area: egui::Rect, lang: Lang) -> bool {
     let panel = egui::Rect::from_min_max(
         egui::pos2(area.left() + 4.0, area.top() + CHROME_H + 2.0),
         egui::pos2(area.right() - 4.0, area.bottom() - 2.0),
@@ -535,18 +551,26 @@ pub fn paint_hints(ui: &mut egui::Ui, area: egui::Rect) -> bool {
     let p = ui.painter();
     p.rect_filled(panel, 10.0, C_SCRIM);
     p.rect_stroke(panel, 10.0, egui::Stroke::new(1.5, C_ACCENT));
+
+    let is_ar = lang == Lang::Ar;
+    let title = if is_ar {
+        crate::arabic::reshape_ar("🎮 اختصارات يد التحكم")
+    } else {
+        "🎮 Controller Shortcuts".to_string()
+    };
     p.text(
         egui::pos2(panel.left() + 18.0, panel.top() + 12.0),
         egui::Align2::LEFT_TOP,
-        "🎮 Controller Shortcuts",
+        title,
         egui::FontId::proportional(15.0),
         C_ACCENT,
     );
 
-    let per_col = HINTS.len().div_ceil(2);
+    let hints_list = if is_ar { HINTS_AR } else { HINTS };
+    let per_col = hints_list.len().div_ceil(2);
     let col_w = panel.width() * 0.5;
     let line_h = 24.0;
-    for (i, (button, what)) in HINTS.iter().enumerate() {
+    for (i, (button, what)) in hints_list.iter().enumerate() {
         let (col, row) = (i / per_col, i % per_col);
         let x = panel.left() + 18.0 + col as f32 * col_w;
         let y = panel.top() + 42.0 + row as f32 * line_h;
@@ -554,25 +578,32 @@ pub fn paint_hints(ui: &mut egui::Ui, area: egui::Rect) -> bool {
         let badge_rect = egui::Rect::from_min_size(egui::pos2(x, y - 1.0), egui::vec2(126.0, 19.0));
         p.rect_filled(badge_rect, 4.0, C_KEY_SPECIAL);
         p.rect_stroke(badge_rect, 4.0, egui::Stroke::new(1.0, C_PANEL_BORDER));
+        let button_text = if is_ar { crate::arabic::reshape_ar(button) } else { button.to_string() };
         p.text(
             badge_rect.center(),
             egui::Align2::CENTER_CENTER,
-            *button,
+            button_text,
             egui::FontId::proportional(12.0),
             C_TEXT,
         );
+        let what_text = if is_ar { crate::arabic::reshape_ar(what) } else { what.to_string() };
         p.text(
             egui::pos2(x + 136.0, y),
             egui::Align2::LEFT_TOP,
-            *what,
+            what_text,
             egui::FontId::proportional(13.0),
             C_TEXT_DIM,
         );
     }
+    let footer = if is_ar {
+        crate::arabic::reshape_ar("انقر في أي مكان أو اضغط R3 للإغلاق")
+    } else {
+        "Click anywhere or press R3 to dismiss".to_string()
+    };
     p.text(
         egui::pos2(panel.center().x, panel.bottom() - 10.0),
         egui::Align2::CENTER_BOTTOM,
-        "Click anywhere or press R3 to dismiss",
+        footer,
         egui::FontId::proportional(11.5),
         C_TEXT_DIM,
     );

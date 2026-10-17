@@ -365,7 +365,7 @@ pub struct Config {
     pub enabled: bool,
     /// Temporarily disable input while a borderless-fullscreen app has focus
     /// (port of `FullScreenLoopDisabler`).
-    #[serde(default)]
+    #[serde(default = "d_true")]
     pub disable_in_fullscreen: bool,
     /// Start automatically with Windows (HKCU Run key).
     #[serde(default)]
@@ -413,7 +413,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             enabled: true,
-            disable_in_fullscreen: false,
+            disable_in_fullscreen: true,
             autostart: false,
             vk_auto_show: true,
             active_profile: String::new(),

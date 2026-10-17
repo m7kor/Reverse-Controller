@@ -40,11 +40,6 @@ pub fn paint_toolbar(
     let mut right_btns = Vec::new();
     let start_col = if has_clear { 1 } else { 0 };
 
-    let send_lbl = if is_ar {
-        crate::arabic::reshape_ar("⏎ إرسال")
-    } else {
-        "⏎ Send".to_string()
-    };
     let copy_lbl = if is_ar {
         crate::arabic::reshape_ar("📄 نسخ")
     } else {
@@ -90,21 +85,6 @@ pub fn paint_toolbar(
                 col_idx: start_col + i,
             });
         }
-        let enter_col = start_col + preds.len();
-        right_btns.push(RightBtn {
-            label: send_lbl,
-            act: Act::Enter,
-            is_primary: true,
-            col_idx: enter_col,
-        });
-        add_common(&mut right_btns);
-    } else if has_clear {
-        right_btns.push(RightBtn {
-            label: send_lbl,
-            act: Act::Enter,
-            is_primary: true,
-            col_idx: start_col,
-        });
         add_common(&mut right_btns);
     } else {
         add_common(&mut right_btns);
