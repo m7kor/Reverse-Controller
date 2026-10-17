@@ -457,6 +457,7 @@ fn main() {
                             let was_vis = f2.load(Ordering::SeqCst);
                             if !was_vis {
                                 crate::platform::log_debug("[main] Text click detected -> surfacing virtual keyboard");
+                                platform::push_foreground();
                                 f2.store(true, Ordering::SeqCst);
                                 let work = platform::work_area();
                                 let origin = crate::config::KeyboardPrefs::default().anchor(work, None);

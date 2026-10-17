@@ -187,6 +187,7 @@ const HINTS: &[(&str, &str)] = &[
     ("A", "Press the highlighted key"),
     ("X / Y", "Backspace / Space"),
     ("Start", "Enter"),
+    ("RT + Start", "Shift + Enter (New line)"),
     ("Back (Select)", "Switch language (EN / ع)"),
     ("B / L3", "Close keyboard"),
     ("😊 / Emoji", "Open Native Emoji Picker"),
@@ -239,6 +240,7 @@ enum Glyph {
     Win,
     Pad,
     Enter,
+    ShiftEnter,
     Backspace,
 }
 
@@ -256,6 +258,7 @@ enum Act {
     Shift,
     Backspace,
     Enter,
+    ShiftEnter,
     Space,
     Tab,
     Lang,
@@ -397,7 +400,7 @@ fn bottom_row(lang: Lang, on_num: bool) -> Vec<KDef> {
         KDef::spec("AltGr", Act::AltGr, 1.0),
         KDef::spec("Edit", Act::EditTools, 1.0),
         KDef { shifted: Some("?"), ..KDef::spec(".", Act::Char('.', Some('?')), 1.0) },
-        KDef::spec("\u{23CE}", Act::Enter, 1.35).with_glyph(Glyph::Enter),
+        KDef::spec("\u{21E7}\u{23CE}", Act::ShiftEnter, 1.35).with_glyph(Glyph::ShiftEnter),
     ]
 }
 
@@ -882,6 +885,7 @@ struct VKbdApp {
     reposition_rx: f32,
     reposition_ry: f32,
     emoji_cat: usize,
+    last_mouse_down_pos: Option<(usize, usize)>,
 }
 
 impl VKbdApp {
@@ -948,6 +952,7 @@ impl VKbdApp {
             reposition_rx: 0.0,
             reposition_ry: 0.0,
             emoji_cat: 0,
+            last_mouse_down_pos: None,
         }
     }
 
@@ -1130,6 +1135,24 @@ impl VKbdApp {
             Act::Enter => {
                 self.tap_key(NavKey::Enter);
                 self.typed_buffer.clear();
+                self.typed_word.clear();
+            }
+            Act::ShiftEnter => {
+                crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
+                crate::engine::trigger_haptic(7500, 9500, 0.022);
+                let mods = self.armed_mods();
+                for m in &mods {
+                    self.key.down(*m);
+                }
+                self.key.down(NavKey::LShift);
+                self.key.down(NavKey::Enter);
+                self.key.up(NavKey::Enter);
+                self.key.up(NavKey::LShift);
+                for m in mods.iter().rev() {
+                    self.key.up(*m);
+                }
+                self.release_oneshots();
+                self.typed_buffer.push('\n');
                 self.typed_word.clear();
             }
             Act::Tab => {
@@ -1342,6 +1365,7 @@ impl VKbdApp {
                 | Act::WinKey
                 | Act::Backspace
                 | Act::Enter
+                | Act::ShiftEnter
                 | Act::Tab
                 | Act::Space
                 | Act::Paste
@@ -1373,6 +1397,7 @@ impl VKbdApp {
 
     fn sync_typing_target(&mut self, target: usize) {
         if target == 0 || target == platform::overlay_hwnd() { return; }
+        platform::push_foreground();
         if self.typing_target != target {
             self.typed_word.clear();
             self.typed_buffer.clear();
@@ -1602,6 +1627,9 @@ impl VKbdApp {
             if n.enter > 0 {
                 self.perform_in_context(Act::Enter);
             }
+            if n.shift_enter > 0 {
+                self.perform_in_context(Act::ShiftEnter);
+            }
             if n.close > 0 || n.hide > 0 {
                 self.hide();
             }
@@ -1750,6 +1778,9 @@ impl VKbdApp {
         }
         for _ in 0..n.enter {
             self.perform_in_context(Act::Enter);
+        }
+        for _ in 0..n.shift_enter {
+            self.perform_in_context(Act::ShiftEnter);
         }
         for _ in 0..n.period {
             self.perform_in_context(Act::Char('.', None));
@@ -2120,7 +2151,10 @@ impl eframe::App for VKbdApp {
                             enabled: !hints_on,
                         };
                         let ev = paint_key(ui, egui::Id::new(("vk_key", ri, ci)), rect, &view);
-                        if ev.pressed {
+                        if ev.down_now {
+                            self.last_mouse_down_pos = Some((ri, ci));
+                            pressed_key = Some((ri, ci, kd.act));
+                        } else if ev.clicked && self.last_mouse_down_pos != Some((ri, ci)) {
                             pressed_key = Some((ri, ci, kd.act));
                         }
                         if ev.held {
@@ -2181,6 +2215,7 @@ impl eframe::App for VKbdApp {
         let mouse_down = ctx.input(|i| i.pointer.primary_down());
         if !mouse_down {
             self.repeat = None;
+            self.last_mouse_down_pos = None;
         }
 
         if let Some((r, c, act)) = pressed_key {
@@ -3037,7 +3072,9 @@ struct KeyView<'a> {
 struct KeyEvent {
     /// The pointer went down on this key this frame (fires immediately, so
     /// typing feels instant and hold-to-repeat can start).
-    pressed: bool,
+    down_now: bool,
+    /// Physical mouse click completed (pressed & released on this key).
+    clicked: bool,
     /// The pointer is still held down on this key.
     held: bool,
 }
@@ -3049,7 +3086,8 @@ fn paint_key(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect, v: &KeyView) -> 
     let painter = ui.painter_at(rect.expand(4.0));
 
     let hovered = v.enabled && resp.hovered();
-    let pressed = hovered && ui.input(|i| i.pointer.primary_pressed());
+    let down_now = hovered && ui.input(|i| i.pointer.primary_pressed());
+    let clicked = v.enabled && resp.clicked();
     let held = v.enabled && resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
     let is_down = held || v.flash;
     let is_focused = v.focused || v.split_left || v.split_right;
@@ -3191,6 +3229,7 @@ fn paint_key(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect, v: &KeyView) -> 
         Glyph::Win => draw_win(&painter, draw_rect, fg),
         Glyph::Pad => draw_pad(&painter, draw_rect, fg),
         Glyph::Enter => draw_enter(&painter, draw_rect, fg),
+        Glyph::ShiftEnter => draw_shift_enter(&painter, draw_rect, fg),
         Glyph::Backspace => draw_backspace(&painter, draw_rect, fg),
         Glyph::Text => {
             if v.act == Act::Space {
@@ -3274,7 +3313,7 @@ fn paint_key(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect, v: &KeyView) -> 
         );
     }
 
-    KeyEvent { pressed, held }
+    KeyEvent { down_now, clicked, held }
 }
 
 /// Spacebar: subtle Fluent pill indicator + dim label.
@@ -3343,6 +3382,29 @@ fn draw_enter(p: &egui::Painter, rect: egui::Rect, col: egui::Color32) {
     p.line_segment([pt(w * 0.45, -h * 0.40), pt(w * 0.45, h * 0.30)], stroke);
     p.line_segment([pt(w * 0.45, h * 0.30), pt(-w * 0.45, h * 0.30)], stroke);
     p.line_segment([pt(-w * 0.45, h * 0.30), pt(-w * 0.12, h * 0.0)], stroke);
+    p.line_segment([pt(-w * 0.45, h * 0.30), pt(-w * 0.12, h * 0.60)], stroke);
+}
+
+/// Shift+Enter glyph: vector-drawn upward shift arrow paired with return arrow.
+fn draw_shift_enter(p: &egui::Painter, rect: egui::Rect, col: egui::Color32) {
+    let c = rect.center();
+    let h = rect.height() * 0.36;
+    let stroke = egui::Stroke::new(2.0, col);
+
+    // Left side: Upward Shift arrow (at c.x - 12.0)
+    let sx = c.x - 12.0;
+    let sy = c.y;
+    p.line_segment([egui::pos2(sx, sy + h * 0.45), egui::pos2(sx, sy - h * 0.45)], stroke);
+    p.line_segment([egui::pos2(sx, sy - h * 0.45), egui::pos2(sx - 4.5, sy - h * 0.05)], stroke);
+    p.line_segment([egui::pos2(sx, sy - h * 0.45), egui::pos2(sx + 4.5, sy - h * 0.05)], stroke);
+
+    // Right side: Classic return arrow (at c.x + 9.0)
+    let ex = c.x + 9.0;
+    let w = rect.height() * 0.28;
+    let pt = |x: f32, y: f32| egui::pos2(ex + x, c.y + y);
+    p.line_segment([pt(w * 0.45, -h * 0.40), pt(w * 0.45, h * 0.30)], stroke);
+    p.line_segment([pt(w * 0.45, h * 0.30), pt(-w * 0.45, h * 0.30)], stroke);
+    p.line_segment([pt(-w * 0.45, h * 0.30), pt(-w * 0.12, 0.0)], stroke);
     p.line_segment([pt(-w * 0.45, h * 0.30), pt(-w * 0.12, h * 0.60)], stroke);
 }
 
@@ -3664,7 +3726,7 @@ mod tests {
         let rows = en_abc();
         let bottom = rows.last().unwrap();
         let acts: Vec<Act> = bottom.iter().map(|k| k.act).collect();
-        for needed in [Act::Lang, Act::ToggleLayer, Act::Space, Act::Enter, Act::WinKey, Act::AltGr] {
+        for needed in [Act::Lang, Act::ToggleLayer, Act::Space, Act::ShiftEnter, Act::WinKey, Act::AltGr] {
             assert!(acts.contains(&needed), "bottom row is missing {needed:?}");
         }
     }
@@ -3699,7 +3761,7 @@ mod tests {
                 assert!(top.contains(d), "{lang:?} ?123 row is missing {d}");
             }
             assert!(rows[4].iter().any(|k| k.act == Act::Space));
-            assert!(rows[4].iter().any(|k| k.act == Act::Enter));
+            assert!(rows[4].iter().any(|k| k.act == Act::ShiftEnter));
         }
     }
 
@@ -3851,6 +3913,7 @@ mod tests {
             Act::AltGr,
             Act::Caps,
             Act::Enter,
+            Act::ShiftEnter,
             Act::Lang,
             Act::ToggleLayer,
             Act::Close,

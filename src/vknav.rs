@@ -37,6 +37,8 @@ pub struct VkNav {
     pub lang: u32,
     /// Number of Enter presses (Start).
     pub enter: u32,
+    /// Number of Shift+Enter presses (RT + Start).
+    pub shift_enter: u32,
     /// Number of period presses (B in the original keyboard profile).
     pub period: u32,
     /// Number of hide requests (LeftThumb / L3 in the original).

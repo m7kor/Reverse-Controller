@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v1.2.3] — 2026-10-17
+
+### 🚀 Highlights
+- **Physical Mouse Clicking on Virtual Keyboard**: Completely overhauled virtual keyboard key interactions (`paint_key`) to seamlessly handle mouse clicks with zero latency, eliminating dropped clicks on non-activating overlay windows while preserving instantaneous controller navigation and hold-to-repeat.
+- **Inverted L1 and R1 Caret Movement**: Swapped shoulder bumper navigation (`B_LEFT_SHOULDER` -> moves right, `B_RIGHT_SHOULDER` -> moves left) matching user expectations for natural cursor motion.
+- **Dedicated Shift+Enter Key on Keyboard**: Replaced duplicate bottom-row Enter with a dedicated `Shift+Enter` (`⇧↵`) key, allowing users to insert newlines in messaging applications (Discord, WhatsApp, Telegram, ChatGPT) without triggering accidental sends.
+- **Gamepad Shift+Enter Shortcut (`RT + Start`)**: Introduced controller shortcut for `Shift+Enter`: holding `RT` (physical Shift trigger) while pressing `Start` (Enter) instantly sends `Shift+Enter` anywhere.
+- **Foreground Target Sync on Text Click**: Added `platform::push_foreground()` to text click detection so virtual keyboard keystrokes and shortcuts always target the focused text window.
+
+---
+
 ## [v1.2.2] — 2026-10-16
 
 ### 🚀 Highlights

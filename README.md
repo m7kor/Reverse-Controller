@@ -131,15 +131,17 @@ Pressing **L3** surfaces the floating keyboard overlay, repurposing your control
 | **🔵 Button X** | **Backspace** with accelerating deletion speed on sustained hold. |
 | **🟡 Button Y** | **Spacebar** with continuous spacing on hold. |
 | **🔴 Button B** | **Dismiss Keyboard** and return directly to desktop mode. |
-| **⏮️ Left Bumper L1 (LB)** | **Move Caret Left (←)** across text fields for quick typo corrections. |
-| **⏭️ Right Bumper R1 (RB)** | **Move Caret Right (→)** across text fields with auto-repeat. |
+| **⏮️ Left Bumper L1 (LB)** | **Move Caret Right (→)** across text fields for fast typo navigation. |
+| **⏭️ Right Bumper R1 (RB)** | **Move Caret Left (←)** across text fields with continuous auto-repeat. |
 | **🎯 Left Trigger L2 (LT)** | **Switch to Numbers & Symbols Layer** (`?123` / `#+=`). |
 | **⚡ Right Trigger R2 (RT)** | **Capitalize / Shift / Diacritics** (Tashkeel in Arabic, uppercase in English). |
 | **🔘 R3 (Right Stick Click)** | **Reposition Mode:** Click R3 to activate, freely move the keyboard with the Right Stick anywhere on screen, and click R3 again to lock! |
 | **🔘 L3 (Left Stick Click)** | **Dismiss Keyboard** immediately. |
 | **🎮 L3 + R3 Together** | **Toggle Dual-Stick Split Mode:** Splits the keyboard into two halves for simultaneous two-thumb typing (Steam Deck layout). |
 | **📋 Back Button** | **Toggle Language** instantly between Arabic and English (`AR ⇋ EN`). |
-| **▶️ Start Button** | **Enter / Submit** (Newline or message send). |
+| **▶️ Start Button** | **Enter / Submit** (Standard Enter key). |
+| **⚡ RT + Start** | **Shift + Enter:** Inserts newlines in Discord, WhatsApp, Telegram, ChatGPT without sending! |
+| **⇧↵ Button on Keyboard** | **Dedicated Shift+Enter Key:** Placed on the bottom row next to period for direct newline injection via controller or mouse click. |
 | **🛠️ Edit Button on Keyboard** | **Open Edit Tools Layer:** Copy, Paste, Cut, Undo, Redo, Select All, and Clear Word. |
 | **😀 Emoji Button on Keyboard** | **Open Native Emoji Browser:** Categorized offline emoji picker. |
 
