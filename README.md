@@ -1,37 +1,62 @@
-# 🎮 Reverse Controller (Controller Companion — Native Rust Edition)
+<div align="center">
 
-🌐 **[English](README.md)** | **[العربية (Arabic)](README.ar.md)**
+# 🎮 Reverse Controller
+### *The Ultimate Native Rust Gamepad Navigation & Virtual Keyboard System*
 
-[![Rust](https://img.shields.io/badge/Rust-2021%20Edition-orange?logo=rust)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-blue?logo=windows)](https://microsoft.com/windows)
-[![Release](https://img.shields.io/github/v/release/m7kor/Reverse-Controller?color=blue&logo=github)](https://github.com/m7kor/Reverse-Controller/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-131%20Passed-brightgreen)](https://github.com/m7kor/Reverse-Controller/actions)
-[![Clippy](https://img.shields.io/badge/Clippy-0%20Warnings-brightgreen)](https://github.com/m7kor/Reverse-Controller)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2021%20Edition-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
+[![Release](https://img.shields.io/github/v/release/m7kor/Reverse-Controller?style=for-the-badge&color=2ea44f&logo=github)](https://github.com/m7kor/Reverse-Controller/releases/latest)
+[![Tests](https://img.shields.io/badge/Tests-131%20Passed-brightgreen?style=for-the-badge)](https://github.com/m7kor/Reverse-Controller)
+[![Clippy](https://img.shields.io/badge/Clippy-0%20Warnings-success?style=for-the-badge)](https://github.com/m7kor/Reverse-Controller)
+[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
-**[📥 Download Latest Release](https://github.com/m7kor/Reverse-Controller/releases/latest)** · **[📜 Full Changelog](CHANGELOG.md)** · **[📖 الدليل باللغة العربية](README.ar.md)** · **[📋 Comprehensive Audit Report](docs/comprehensive_audit_and_fix_report.md)**
+<br/>
 
-> [!NOTE]
-> For detailed release notes and feature highlights across every published version, visit the **[GitHub Releases Page](https://github.com/m7kor/Reverse-Controller/releases)** or inspect the **[CHANGELOG.md](CHANGELOG.md)**.
+**[English](README.md)** • **[🇸🇦 العربية (Arabic)](README.ar.md)** • **[📥 Download v1.2.3](https://github.com/m7kor/Reverse-Controller/releases/latest)** • **[📜 Changelog](CHANGELOG.md)** • **[📋 Audit Report](docs/comprehensive_audit_and_fix_report.md)**
+
+---
+
+</div>
+
+> [!TIP]
+> **Zero Steam Dependency · 100% Offline AI Voice Dictation · Sub-millisecond 125Hz Polling · Pure Native Rust**
+>
+> For version release notes and update archives, visit the **[GitHub Releases Page](https://github.com/m7kor/Reverse-Controller/releases)** or consult the **[CHANGELOG.md](CHANGELOG.md)**.
+
+---
+
+## ⚡ Quick Navigation
+
+| Section | Description |
+| :--- | :--- |
+| **[📖 About](#-about-the-project)** | Overview, philosophy, and performance metrics. |
+| **[📊 Comparison](#-technical-comparison)** | Reverse Controller vs commercial Controller Companion. |
+| **[🏛️ Architecture](#️-system-architecture)** | Core engine, GPU overlay, and Whisper AI pipeline. |
+| **[🎮 Controls Guide](#-complete-controller-mapping-guide)** | Desktop mouse, virtual keyboard, and system shortcuts. |
+| **[🎙️ Voice Dictation](#4️⃣-offline-ai-voice-dictation--natural-macros)** | Offline speech-to-text and voice punctuation macros. |
+| **[🚀 Getting Started](#-quick-start)** | Instant download and portable execution. |
+| **[🛠️ Building from Source](#️-building-from-source)** | Prerequisites and compilation instructions. |
 
 ---
 
 ## 📖 About The Project
 
-**Reverse Controller** is a ground-up, high-performance, 100% open-source reimplementation of the popular **Controller Companion** desktop navigation software for Windows, authored entirely in safe, native **Rust 2021**.
+**Reverse Controller** is a high-performance, open-source reimplementation of the classic **Controller Companion** desktop navigation utility, built from the ground up in safe, concurrent **Rust 2021**.
 
-It turns any standard gamepad (Xbox One / Series, PlayStation DualShock 4 / DualSense, Nintendo Switch Pro, or generic DirectInput / XInput controllers) into a full desktop mouse and keyboard with sub-millisecond responsiveness, completely decoupled from Steam and proprietary Windows services.
+It seamlessly transforms any standard gamepad (Xbox Series / One / 360, PlayStation DualSense / DualShock 4, Nintendo Switch Pro, or generic XInput / DirectInput controllers) into an ultra-responsive desktop mouse and keyboard with sub-millisecond precision — without Steam, background bloat, or cloud dependencies.
 
 ### 🌟 Key Highlights
-- ⚡ **Ultra-Low Resource Footprint:** Idles at **~25MB RAM** (compared to 150MB+ for Electron / .NET solutions) with **<0.2% CPU** usage during 125Hz polling and **<1.2ms** input latency.
-- 🔒 **100% Private & Autonomous:** Zero Steam client dependencies. Replaces cloud-tethered Windows voice typing (Win+H) and emoji picker (Win+.) with an offline, CPU-accelerated **Whisper AI** model and a lightweight built-in emoji browser.
-- 🎨 **Modern Windows 11 Visuals:** Translucent GPU-accelerated overlay rendered via `egui` with native Acrylic / Mica glass effects, interactive button visualizers, and tactile mechanical sound effects.
-- 🌐 **First-Class Bilingual Typing:** Full Arabic (RTL, contextual reshaping, diacritics/tashkeel) and English QWERTY layouts with automatic text caret avoidance and caret navigation triggers.
-- 🛡️ **Industrial-Grade Reliability:** 131 unit tests with 100% pass rate, 88 headless verification tests, and 0 Clippy linter warnings.
+
+- ⚡ **Ultra-Lightweight & Blazing Fast:** Idles at **~24MB RAM** (vs 150MB+ for .NET / Electron utilities) with **<0.2% CPU** usage during 125Hz polling and **<1.2ms** input latency.
+- 🔒 **100% Offline & Private:** Zero cloud telemetry or external runtime dependencies. Local **OpenAI Whisper AI** provides speech-to-text directly on the CPU without Windows Voice Typing (Win+H).
+- 🖱️ **Hybrid Control:** Full support for physical mouse clicks on virtual keyboard buttons alongside instantaneous controller grid navigation.
+- 🎨 **Modern Fluent 2 Aesthetics:** GPU-accelerated translucent overlay rendered via `egui` with Windows 11 Acrylic / Mica glass effects, interactive visualizers, and tactile audio feedback.
+- 🌐 **First-Class Bilingual Typing:** Native Arabic (RTL, contextual reshaping, diacritics/tashkeel) and English QWERTY layouts with automatic text caret avoidance and caret navigation triggers.
+- 🛡️ **Tested & Verified:** 131 unit tests with 100% pass rate and 0 Clippy linter warnings.
 
 ---
 
-## 📊 Technical Comparison: Reverse Controller vs Original Controller Companion
+## 📊 Technical Comparison
 
 | Feature | Original Controller Companion (Commercial) | Reverse Controller (Rust Edition) |
 | :--- | :--- | :--- |
@@ -44,6 +69,8 @@ It turns any standard gamepad (Xbox One / Series, PlayStation DualShock 4 / Dual
 | **Emoji Browser** | Triggers Windows OS Flyout (Win + .) | **Lightweight Native Categorized Emoji Browser** |
 | **Keyboard Repositioning** | Clunky manual mouse dragging | **One-Touch R3 Analog Repositioning Across Screens** |
 | **Split-Stick Typing** | Not Supported | **Dual-Stick Steam Deck-Style Split Mode (L3+R3)** |
+| **Dedicated Shift+Enter** | Not Supported | **Dedicated `⇧↵` Key + `RT + Start` Gamepad Shortcut** |
+| **Mouse Interaction** | Limited / conflicts with overlay | **Full Physical Mouse & Touch Key Support** |
 | **Edit Tools Layer** | None | **Dedicated layer for Copy, Paste, Cut, Undo, Select All** |
 | **Source Code & License** | Proprietary Commercial | **100% Free & Open Source (MIT License)** |
 
@@ -189,12 +216,21 @@ Reverse Controller features an embedded, offline speech-to-text pipeline powered
 
 Reverse Controller is completely portable and requires zero installation:
 
-1. Download the latest release archive: **[Releases](https://github.com/m7kor/Reverse-Controller/releases/latest)**.
-2. Extract the `.zip` archive to any folder and run `ReverseController.exe`.
-3. Connect your gamepad and start navigating!
-4. The application docks in the System Notification Tray (near the clock):
-   - **Left-Click Tray Icon:** Opens the comprehensive Settings Panel (Pointer sensitivity, Keyboard prefs, Voice & AI settings, Profiles).
-   - **Right-Click Tray Icon:** Opens the Quick Menu to toggle control, restart, or quit.
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  🚀 Direct Executable: ReverseController.exe (8.4 MB - Ready to Run)   │
+│  📦 Portable Package:  ReverseController-v1.2.3-windows-x64.zip (3.3 MB)│
+│  👉 https://github.com/m7kor/Reverse-Controller/releases/latest         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **Download:** Grab the latest portable package from **[GitHub Releases](https://github.com/m7kor/Reverse-Controller/releases/latest)**.
+2. **Extract:** Unzip to any folder of your choice.
+3. **Launch:** Run `ReverseController.exe` (no admin rights or external runtimes required).
+4. **Enjoy:** Connect any Xbox, PlayStation, or generic gamepad.
+5. **System Tray Integration:**
+   - **Left-Click Tray Icon:** Opens the comprehensive Settings Panel (Pointer curves, Deadzones, Keyboard prefs, Voice & AI calibration, Profiles).
+   - **Right-Click Tray Icon:** Opens the Quick Menu to toggle control on/off, restart, or quit.
 
 ---
 
