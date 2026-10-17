@@ -107,6 +107,7 @@ pub enum Act {
     CloseActiveWindow,
     ClearTyped,
     AcceptPrediction(&'static str),
+    #[allow(dead_code)]
     FlipPosition,
     ToggleSplitMode,
 }
@@ -188,6 +189,7 @@ impl KDef {
         Self { alt: Some(ch_str(corner)), ..Self::new("لا", Act::Str("لا")) }
     }
     /// A diacritic, shown over a dotted circle so it is visible on its own.
+    #[allow(dead_code)]
     pub fn ar_mark(mark: char) -> Self {
         Self::new(intern(&format!("\u{25CC}{mark}")), Act::Char(mark, None))
     }
@@ -202,23 +204,20 @@ pub fn bottom_row(lang: Lang, on_num: bool) -> Vec<KDef> {
         Lang::Ar => ("\u{0639} / EN", "\u{0645}\u{0633}\u{0627}\u{0641}\u{0629}"), // مسافة
     };
     let layer_label = if on_num { "abc" } else { "?123" };
-    let (copy_lbl, paste_lbl) = match lang {
-        Lang::En => ("Copy", "Paste"),
-        Lang::Ar => ("\u{0646}\u{0633}\u{062e}", "\u{0644}\u{0635}\u{0642}"), // نسخ, لصق
+    let newline_label = if lang == Lang::Ar {
+        "\u{21B5} \u{0633}\u{0637}\u{0631} \u{062c}\u{062f}\u{064a}\u{062f}" // ↵ سطر جديد
+    } else {
+        "\u{21B5} New Line"
     };
     vec![
-        KDef::spec(lang_label, Act::Lang, 1.0),
-        KDef::spec(layer_label, Act::ToggleLayer, 1.0),
-        KDef::spec("Ctrl", Act::Ctrl, 1.0),
-        KDef::spec("", Act::WinKey, 1.0).with_glyph(Glyph::Win),
-        KDef::spec("Alt", Act::Alt, 1.0),
-        KDef::spec(copy_lbl, Act::Copy, 1.0),
-        KDef::spec(paste_lbl, Act::Paste, 1.0),
-        KDef::spec(space_label, Act::Space, 4.0),
-        KDef::spec("AltGr", Act::AltGr, 1.0),
-        KDef::spec("Edit", Act::EditTools, 1.0),
-        KDef { shifted: Some("?"), ..KDef::spec(".", Act::Char('.', Some('?')), 1.0) },
-        KDef::spec("\u{21E7}\u{23CE}", Act::ShiftEnter, 1.35).with_glyph(Glyph::ShiftEnter),
+        KDef::spec(layer_label, Act::ToggleLayer, 1.35),
+        KDef::spec("Ctrl", Act::Ctrl, 1.2),
+        KDef::spec("", Act::WinKey, 1.2).with_glyph(Glyph::Win),
+        KDef::spec("Alt", Act::Alt, 1.2),
+        KDef::spec(space_label, Act::Space, 5.0),
+        KDef::spec("AltGr", Act::AltGr, 1.2),
+        KDef::spec(lang_label, Act::Lang, 1.5),
+        KDef::spec(newline_label, Act::ShiftEnter, 2.5).with_glyph(Glyph::ShiftEnter),
     ]
 }
 
@@ -400,31 +399,47 @@ pub fn num_layer(lang: Lang) -> Vec<Vec<KDef>> {
     vec![r1, r2, r3, r4, bottom_row(lang, true)]
 }
 
-/// Arabic layout (standard Arabic 101 letters, Windows-touch style)
+/// Arabic layout (clean 60% ANSI mechanical PC layout with dedicated numbers row)
 pub fn ar_abc() -> Vec<Vec<KDef>> {
-    let r1 = {
-        let mut v = vec![KDef::spec("Esc", Act::Key(NavKey::Escape), 1.35)];
-        for (a, d) in [
-            ('\u{0636}', '1'), // ض
-            ('\u{0635}', '2'), // ص
-            ('\u{062B}', '3'), // ث
-            ('\u{0642}', '4'), // ق
-            ('\u{0641}', '5'), // ف
-            ('\u{063A}', '6'), // غ
-            ('\u{0639}', '7'), // ع
-            ('\u{0647}', '8'), // ه
-            ('\u{062E}', '9'), // خ
-            ('\u{062D}', '0'), // ح
-            ('\u{062C}', '-'), // ج
-            ('\u{062F}', '='), // د
-        ] {
-            v.push(KDef::ar(a, d));
-        }
-        v.push(KDef::spec("\u{232B}", Act::Backspace, 2.0).with_glyph(Glyph::Backspace));
-        v
-    };
+    let r1 = vec![
+        KDef::spec("Esc", Act::Key(NavKey::Escape), 1.35),
+        KDef::digit('1', '!'),
+        KDef::digit('2', '@'),
+        KDef::digit('3', '#'),
+        KDef::digit('4', '$'),
+        KDef::digit('5', '%'),
+        KDef::digit('6', '^'),
+        KDef::digit('7', '&'),
+        KDef::digit('8', '*'),
+        KDef::digit('9', '('),
+        KDef::digit('0', ')'),
+        KDef::digit('-', '_'),
+        KDef::digit('=', '+'),
+        KDef::spec("\u{232B}", Act::Backspace, 2.0).with_glyph(Glyph::Backspace),
+    ];
     let r2 = {
         let mut v = vec![KDef::spec("Tab", Act::Tab, 1.5)];
+        for (a, l) in [
+            ('\u{0636}', 'q'), // ض
+            ('\u{0635}', 'w'), // ص
+            ('\u{062B}', 'e'), // ث
+            ('\u{0642}', 'r'), // ق
+            ('\u{0641}', 't'), // ف
+            ('\u{063A}', 'y'), // غ
+            ('\u{0639}', 'u'), // ع
+            ('\u{0647}', 'i'), // ه
+            ('\u{062E}', 'o'), // خ
+            ('\u{062D}', 'p'), // ح
+            ('\u{062C}', '['), // ج
+            ('\u{062F}', ']'), // د
+        ] {
+            v.push(KDef::ar(a, l));
+        }
+        v.push(KDef::shiftable('\\', '|'));
+        v
+    };
+    let r3 = {
+        let mut v = vec![KDef::spec("Caps", Act::Caps, 1.75)];
         for (a, l) in [
             ('\u{0634}', 'a'), // ش
             ('\u{0633}', 's'), // س
@@ -437,49 +452,26 @@ pub fn ar_abc() -> Vec<Vec<KDef>> {
             ('\u{0645}', 'l'), // م
             ('\u{0643}', ';'), // ك
             ('\u{0637}', '\''), // ط
-            ('\u{0630}', '`'), // ذ
         ] {
             v.push(KDef::ar(a, l));
         }
+        v.push(KDef::spec("\u{23CE}", Act::Enter, 2.2).with_glyph(Glyph::Enter));
         v
     };
-    let r3 = {
-        let mut v = vec![KDef::spec("Caps", Act::Caps, 1.75)];
+    let r4 = {
+        let mut v = vec![KDef::spec("Shift", Act::Shift, 2.25)];
+        v.push(KDef::ar('\u{0630}', '`')); // ذ
         v.push(KDef::ar('\u{0626}', 'z')); // ئ
         v.push(KDef::ar('\u{0621}', 'x')); // ء
         v.push(KDef::ar('\u{0624}', 'c')); // ؤ
         v.push(KDef::ar('\u{0631}', 'v')); // ر
-        v.push(KDef::ar_ligature('b')); // لا
+        v.push(KDef::ar_ligature('b'));     // لا
         v.push(KDef::ar('\u{0649}', 'n')); // ى
         v.push(KDef::ar('\u{0629}', 'm')); // ة
         v.push(KDef::ar('\u{0648}', ',')); // و
         v.push(KDef::ar('\u{0632}', '.')); // ز
         v.push(KDef::ar('\u{0638}', '/')); // ظ
-        v.push(KDef::spec("\u{23CE}", Act::Enter, 2.2).with_glyph(Glyph::Enter));
-        v
-    };
-    let r4 = {
-        let mut v: Vec<KDef> = [
-            '\u{064E}', // فتحة
-            '\u{064F}', // ضمة
-            '\u{0650}', // كسرة
-            '\u{0652}', // سكون
-            '\u{0651}', // شدة
-            '\u{064B}', // تنوين فتح
-            '\u{064C}', // تنوين ضم
-            '\u{064D}', // تنوين كسر
-            '\u{0670}', // ٰ superscript alef
-            '\u{0653}', // همزة فوق
-            '\u{0654}', // همزة تحت
-            '\u{0655}', // مدّ
-        ]
-        .into_iter()
-        .map(KDef::ar_mark)
-        .collect();
-        v.push(KDef::sym('\u{0640}')); // ـ tatweel
-        v.push(KDef::sym('\u{060C}')); // ،
-        v.push(KDef::sym('\u{061B}')); // ؛
-        v.push(KDef::sym('\u{061F}')); // ؟
+        v.push(KDef::spec("Shift", Act::Shift, 2.75));
         v
     };
     vec![r1, r2, r3, r4, bottom_row(Lang::Ar, false)]

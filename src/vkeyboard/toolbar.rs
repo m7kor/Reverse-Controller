@@ -19,7 +19,7 @@ pub fn paint_toolbar(
     typed_buffer: &str,
     typed_word: &str,
     lang: Lang,
-    split_mode: bool,
+    _split_mode: bool,
     focused: bool,
     focused_col: usize,
 ) -> (ToolbarEvent, usize) {
@@ -55,41 +55,10 @@ pub fn paint_toolbar(
     } else {
         "📋 Paste".to_string()
     };
-    let cut_lbl = if is_ar {
-        crate::arabic::reshape_ar("✂ قص")
+    let newline_lbl = if is_ar {
+        crate::arabic::reshape_ar("↵ سطر جديد")
     } else {
-        "✂ Cut".to_string()
-    };
-    let undo_lbl = if is_ar {
-        crate::arabic::reshape_ar("↩ تراجع")
-    } else {
-        "↩ Undo".to_string()
-    };
-    let sel_all_lbl = if is_ar {
-        crate::arabic::reshape_ar("🔘 تحديد")
-    } else {
-        "🔘 All".to_string()
-    };
-    let flip_lbl = if is_ar {
-        crate::arabic::reshape_ar("⇅ تبديل")
-    } else {
-        "⇅ Flip".to_string()
-    };
-    let lang_lbl = if is_ar {
-        "🌐 EN".to_string()
-    } else {
-        crate::arabic::reshape_ar("🌐 ع")
-    };
-    let split_lbl = if split_mode {
-        if is_ar {
-            crate::arabic::reshape_ar("⌨ مدمج")
-        } else {
-            "⌨ Split".to_string()
-        }
-    } else if is_ar {
-        crate::arabic::reshape_ar("⌨ فردي")
-    } else {
-        "⌨ Single".to_string()
+        "↵ New Line".to_string()
     };
 
     let add_shortcut = |btns: &mut Vec<RightBtn>, label: String, act: Act| {
@@ -104,12 +73,7 @@ pub fn paint_toolbar(
     let add_common = |btns: &mut Vec<RightBtn>| {
         add_shortcut(btns, copy_lbl.clone(), Act::Copy);
         add_shortcut(btns, paste_lbl.clone(), Act::Paste);
-        add_shortcut(btns, cut_lbl.clone(), Act::Cut);
-        add_shortcut(btns, undo_lbl.clone(), Act::Undo);
-        add_shortcut(btns, sel_all_lbl.clone(), Act::SelectAll);
-        add_shortcut(btns, flip_lbl.clone(), Act::FlipPosition);
-        add_shortcut(btns, split_lbl.clone(), Act::ToggleSplitMode);
-        add_shortcut(btns, lang_lbl.clone(), Act::Lang);
+        add_shortcut(btns, newline_lbl.clone(), Act::ShiftEnter);
     };
 
     if !typed_word.is_empty() {

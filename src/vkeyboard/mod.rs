@@ -456,10 +456,9 @@ impl VKbdApp {
                 };
                 self.last_sys_lang = Some(self.lang);
                 self.dirty = true;
-                self.key.down(NavKey::LMenu);
-                self.key.down(NavKey::LShift);
-                self.key.up(NavKey::LShift);
-                self.key.up(NavKey::LMenu);
+                self.key.down(NavKey::LWin);
+                self.key.tap(NavKey::Space);
+                self.key.up(NavKey::LWin);
             }
             Act::ToggleLayer => {
                 self.layer = match self.layer {
@@ -611,6 +610,7 @@ impl VKbdApp {
                 | Act::ShowDesktop
                 | Act::CloseActiveWindow
                 | Act::AcceptPrediction(_)
+                | Act::Lang
         );
         if sends_input {
             let cur = platform::foreground_hwnd();
@@ -675,12 +675,7 @@ impl VKbdApp {
         }
         acts.push(Act::Copy);
         acts.push(Act::Paste);
-        acts.push(Act::Cut);
-        acts.push(Act::Undo);
-        acts.push(Act::SelectAll);
-        acts.push(Act::FlipPosition);
-        acts.push(Act::ToggleSplitMode);
-        acts.push(Act::Lang);
+        acts.push(Act::ShiftEnter);
         acts
     }
 
@@ -989,8 +984,7 @@ impl VKbdApp {
             self.dirty = true;
         }
         if n.lang > 0 {
-            self.lang = if self.lang == Lang::En { Lang::Ar } else { Lang::En };
-            self.dirty = true;
+            self.perform_in_context(Act::Lang);
             self.window_pos = None;
             let (wx, wy, ww, wh) = platform::work_area();
             self.window_pos = Some(self.prefs.anchor((wx, wy, ww, wh), None));
@@ -1597,7 +1591,6 @@ mod tests {
             let sizes = layout::widths(&rows);
             assert!(sizes.iter().all(|size| (*size - sizes[0]).abs() < 0.001));
             assert!(!repeatable(Act::DeleteWord));
-            assert!(build_layout(lang, Layer::Abc).iter().flatten().any(|key| key.act == Act::EditTools));
         }
     }
 
@@ -1664,16 +1657,10 @@ mod tests {
     }
 
     #[test]
-    fn arabic_tashkeel_row_is_not_visibly_gappy() {
+    fn arabic_row4_has_balanced_letter_keys() {
         let rows = layout::ar_abc();
         let r4 = &rows[3];
-        assert!(r4.len() >= 12, "tashkeel row has only {} keys", r4.len());
-        let total: f32 = r4.iter().map(|k| k.w).sum();
-        let widest = r4.iter().map(|k| k.w).fold(0.0f32, f32::max);
-        assert!(
-            widest <= total / 3.0,
-            "one tashkeel key covers {widest} of {total} units"
-        );
+        assert_eq!(r4.len(), 13, "Arabic row 4 should have 13 keys (Shift + 11 letters + Shift)");
     }
 
     #[test]
@@ -1755,14 +1742,20 @@ mod tests {
     }
 
     #[test]
-    fn arabic_layout_has_no_digit_row() {
+    fn arabic_layout_has_digit_row() {
         let rows = layout::ar_abc();
         let first = &rows[0];
         assert!(!first.is_empty());
-        let plain_digits = first
+        let digits: String = first
             .iter()
-            .all(|k| matches!(k.label, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
-        assert!(!plain_digits, "Arabic layout should not have a digit row");
+            .filter_map(|k| match k.act {
+                Act::Char(c, _) if c.is_ascii_digit() => Some(c),
+                _ => None,
+            })
+            .collect();
+        for d in "1234567890".chars() {
+            assert!(digits.contains(d), "Arabic layout missing digit {d}");
+        }
     }
 
     #[test]
@@ -1975,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_mode_toggle_action_exists() {
+    fn test_essential_toolbar_actions_exist() {
         let app = VKbdApp::new(
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(VkNav::default())),
@@ -1983,9 +1976,10 @@ mod tests {
             false,
             crate::config::KeyboardPrefs::default(),
         );
-        assert!(!app.split_mode);
         let acts = app.get_toolbar_actions();
-        assert!(acts.contains(&Act::ToggleSplitMode));
+        assert!(acts.contains(&Act::Copy));
+        assert!(acts.contains(&Act::Paste));
+        assert!(acts.contains(&Act::ShiftEnter));
     }
 
     #[test]

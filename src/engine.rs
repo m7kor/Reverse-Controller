@@ -1147,13 +1147,8 @@ impl Engine {
 
         // Direction from D-pad (and left stick as an alternative).
         let dpad_moving = (b & (B_DPAD_RIGHT | B_DPAD_LEFT | B_DPAD_DOWN | B_DPAD_UP)) != 0;
-        const MOUSE_MOVE_TH: i32 = 6000;
-        let stick_moved = (gp.sThumbLX as i32).abs() > MOUSE_MOVE_TH || (gp.sThumbLY as i32).abs() > MOUSE_MOVE_TH;
-
-        if dpad_moving {
+        if dpad_moving || (newly & (B_A | B_X | B_Y | B_START)) != 0 {
             self.nav_grid_active = true;
-        } else if stick_moved {
-            self.nav_grid_active = false;
         }
 
         let mut dx: i32 = 0;
@@ -1247,17 +1242,8 @@ impl Engine {
                 // If D-pad navigation is active: Button A selects the highlighted grid key.
                 // If mouse pointer is being used: Button A sends native mouse left-click!
                 if newly & B_A != 0 {
-                    if self.nav_grid_active {
-                        nav.select += 1;
-                    } else {
-                        crate::platform::note_controller_left_click();
-                        mouse::button_down(mouse::MouseButton::Left);
-                        self.nav_mouse_down = true;
-                    }
-                }
-                if self.nav_mouse_down && (b & B_A == 0) {
-                    mouse::button_up(mouse::MouseButton::Left);
-                    self.nav_mouse_down = false;
+                    self.nav_grid_active = true;
+                    nav.select += 1;
                 }
                 let now = crate::steady_seconds();
                 const TRIGGER_TH: u8 = 60;
