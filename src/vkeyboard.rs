@@ -3532,10 +3532,9 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mut loaded: Vec<String> = Vec::new();
     for (name, path) in [
         ("segoe-ui", "C:\\Windows\\Fonts\\segoeui.ttf"),
-        ("arial", "C:\\Windows\\Fonts\\arial.ttf"),
         ("tahoma", "C:\\Windows\\Fonts\\tahoma.ttf"),
         ("segoe-sym", "C:\\Windows\\Fonts\\seguisym.ttf"),
-        ("segoe-emoji", "C:\\Windows\\Fonts\\seguiemj.ttf"),
+        ("arial", "C:\\Windows\\Fonts\\arial.ttf"),
     ] {
         if let Ok(data) = std::fs::read(path) {
             fonts

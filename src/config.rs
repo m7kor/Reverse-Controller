@@ -440,12 +440,18 @@ pub struct Config {
     /// Local Whisper AI voice dictation and speech-to-text preferences.
     #[serde(default)]
     pub voice: VoiceSettings,
+    /// Settings GUI language ("en" or "ar", default "en").
+    #[serde(default = "d_gui_language")]
+    pub gui_language: String,
     /// The binding table. Missing => built-in default profile.
     #[serde(default = "default_profile")]
     pub bindings: Vec<PadBindingDef>,
 }
 fn d_true() -> bool {
     true
+}
+fn d_gui_language() -> String {
+    "en".to_string()
 }
 
 impl Default for Config {
@@ -463,6 +469,7 @@ impl Default for Config {
             mouse: MouseSettings::default(),
             controller: ControllerSettings::default(),
             voice: VoiceSettings::default(),
+            gui_language: d_gui_language(),
             bindings: default_profile(),
         }
     }
