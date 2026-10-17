@@ -34,7 +34,7 @@
 
 ## 📥 Install
 
-1. Download `controller-companion.exe` from [Releases](https://github.com/m7kor/Reverse-Controller/releases/latest).
+1. Download `ReverseController.exe` (or the portable zip) from [Releases](https://github.com/m7kor/Reverse-Controller/releases/latest).
 2. Run it. It offers to install for your user — no administrator rights needed: it goes to `%LOCALAPPDATA%\Programs\Reverse Controller`, appears in the Start menu, and can be removed from **Settings → Apps → Installed apps**.
 3. Choose **No** to run it as a portable copy instead (you won't be asked again).
 4. On the first start, Settings opens on **Getting started**: a one-minute tutorial that ticks off each step as you do it on the controller.
