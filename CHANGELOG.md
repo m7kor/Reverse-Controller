@@ -9,8 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [v1.2.3] — 2026-10-17
 
 ### 🚀 Highlights
-- **Physical Mouse Clicking on Virtual Keyboard**: Completely overhauled virtual keyboard key interactions (`paint_key`) to seamlessly handle mouse clicks with zero latency, eliminating dropped clicks on non-activating overlay windows while preserving instantaneous controller navigation and hold-to-repeat.
-- **Inverted L1 and R1 Caret Movement**: Swapped shoulder bumper navigation (`B_LEFT_SHOULDER` -> moves right, `B_RIGHT_SHOULDER` -> moves left) matching user expectations for natural cursor motion.
+- **Gamepad Mouse Pointer Clicking via Button A**: Re-engineered controller input while the keyboard is visible so Button A acts as a native mouse left click when using the left stick to steer the pointer, allowing direct click-to-type on any key, toolbar button, or window with zero dropped inputs.
+- **Dynamic D-Pad Grid Highlight**: The yellow selection box is completely hidden while using the mouse pointer and only appears when the user explicitly navigates with the D-pad arrow keys, seamlessly switching between mouse aiming and discrete grid typing.
+- **Direct Shortcuts on Keyboard & Toolbar**: Added dedicated **Copy (`نسخ`)** and **Paste (`لصق`)** buttons directly to the bottom row of the keyboard layout, alongside a full suite of editing shortcuts in the top action toolbar (**Copy**, **Paste**, **Cut**, **Undo**, **Select All**).
+- **Physical Mouse Clicking on Virtual Keyboard**: Completely overhauled virtual keyboard key interactions (`paint_key`) to seamlessly handle physical mouse and touch clicks with zero latency.
+- **Inverted L1 and R1 Caret Movement**: Swapped shoulder bumper navigation (`LB` -> moves right, `RB` -> moves left) matching natural user thumb expectations.
 - **Dedicated Shift+Enter Key on Keyboard**: Replaced duplicate bottom-row Enter with a dedicated `Shift+Enter` (`⇧↵`) key, allowing users to insert newlines in messaging applications (Discord, WhatsApp, Telegram, ChatGPT) without triggering accidental sends.
 - **Gamepad Shift+Enter Shortcut (`RT + Start`)**: Introduced controller shortcut for `Shift+Enter`: holding `RT` (physical Shift trigger) while pressing `Start` (Enter) instantly sends `Shift+Enter` anywhere.
 - **Foreground Target Sync on Text Click**: Added `platform::push_foreground()` to text click detection so virtual keyboard keystrokes and shortcuts always target the focused text window.

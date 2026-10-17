@@ -67,12 +67,16 @@ pub struct VkNav {
     pub right_stick_y: f32,
     /// Whether keyboard repositioning / move mode is currently active.
     pub is_repositioning: bool,
+    /// Whether D-pad arrow navigation is actively focused on the keyboard grid.
+    /// When false, the yellow focus highlight is hidden and Button A clicks with the mouse pointer.
+    pub grid_nav_active: bool,
 }
 
 impl VkNav {
     /// Read the pending state and reset it (single consumer).
     pub fn drain(&mut self) -> VkNav {
         let is_rep = self.is_repositioning;
+        let is_grid = self.grid_nav_active;
         let rx = self.right_stick_x;
         let ry = self.right_stick_y;
         let sx = self.stick_x;
@@ -80,6 +84,7 @@ impl VkNav {
         let s = *self;
         *self = VkNav::default();
         self.is_repositioning = is_rep;
+        self.grid_nav_active = is_grid;
         self.right_stick_x = rx;
         self.right_stick_y = ry;
         self.stick_x = sx;

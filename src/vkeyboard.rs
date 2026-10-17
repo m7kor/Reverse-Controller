@@ -390,13 +390,19 @@ fn bottom_row(lang: Lang, on_num: bool) -> Vec<KDef> {
         Lang::Ar => ("\u{0639} / EN", "\u{0645}\u{0633}\u{0627}\u{0641}\u{0629}"), // مسافة
     };
     let layer_label = if on_num { "abc" } else { "?123" };
+    let (copy_lbl, paste_lbl) = match lang {
+        Lang::En => ("Copy", "Paste"),
+        Lang::Ar => ("\u{0646}\u{0633}\u{062e}", "\u{0644}\u{0635}\u{0642}"), // نسخ, لصق
+    };
     vec![
-        KDef::spec(lang_label, Act::Lang, 1.35),
-        KDef::spec(layer_label, Act::ToggleLayer, 1.35),
-        KDef::spec("Ctrl", Act::Ctrl, 1.35),
+        KDef::spec(lang_label, Act::Lang, 1.0),
+        KDef::spec(layer_label, Act::ToggleLayer, 1.0),
+        KDef::spec("Ctrl", Act::Ctrl, 1.0),
         KDef::spec("", Act::WinKey, 1.0).with_glyph(Glyph::Win),
         KDef::spec("Alt", Act::Alt, 1.0),
-        KDef::spec(space_label, Act::Space, 4.6),
+        KDef::spec(copy_lbl, Act::Copy, 1.0),
+        KDef::spec(paste_lbl, Act::Paste, 1.0),
+        KDef::spec(space_label, Act::Space, 4.0),
         KDef::spec("AltGr", Act::AltGr, 1.0),
         KDef::spec("Edit", Act::EditTools, 1.0),
         KDef { shifted: Some("?"), ..KDef::spec(".", Act::Char('.', Some('?')), 1.0) },
@@ -886,6 +892,7 @@ struct VKbdApp {
     reposition_ry: f32,
     emoji_cat: usize,
     last_mouse_down_pos: Option<(usize, usize)>,
+    grid_nav_active: bool,
 }
 
 impl VKbdApp {
@@ -953,6 +960,7 @@ impl VKbdApp {
             reposition_ry: 0.0,
             emoji_cat: 0,
             last_mouse_down_pos: None,
+            grid_nav_active: false,
         }
     }
 
@@ -1104,7 +1112,7 @@ impl VKbdApp {
     fn execute_action(&mut self, act: Act) {
         // These actions can change the selection or caret in ways the local
         // preview cannot observe. Never reuse their old prediction prefix.
-        if matches!(act, Act::Key(_) | Act::WinKey | Act::Cut | Act::Undo | Act::Redo | Act::DeleteWord | Act::SelectAll | Act::Paste | Act::TaskView | Act::ShowDesktop | Act::CloseActiveWindow)
+        if matches!(act, Act::Key(_) | Act::WinKey | Act::Copy | Act::Cut | Act::Undo | Act::Redo | Act::DeleteWord | Act::SelectAll | Act::Paste | Act::TaskView | Act::ShowDesktop | Act::CloseActiveWindow)
             || ((self.ctrl || self.alt || self.altgr) && matches!(act, Act::Char(..) | Act::Backspace | Act::Space | Act::Str(_))) {
             self.typed_word.clear();
             self.typed_buffer.clear();
@@ -1347,6 +1355,10 @@ impl VKbdApp {
         self.shown = false;
         self.sized = (0.0, 0.0);
         VKBD_SHOWN.store(false, Ordering::SeqCst);
+        self.grid_nav_active = false;
+        if let Ok(mut g) = self.nav.lock() {
+            g.grid_nav_active = false;
+        }
         self.visible.store(false, Ordering::SeqCst);
         self.reset_transient();
     }
@@ -1525,19 +1537,17 @@ impl VKbdApp {
             acts.push(Act::Enter);
         } else if has_clear {
             acts.push(Act::Enter);
-            acts.push(Act::VoiceDictation);
-            acts.push(Act::Paste);
-            acts.push(Act::FlipPosition);
-            acts.push(Act::ToggleSplitMode);
-            acts.push(Act::Lang);
-        } else {
-            acts.push(Act::VoiceDictation);
-            acts.push(Act::Paste);
-            acts.push(Act::FlipPosition);
-            acts.push(Act::EmojiPicker);
-            acts.push(Act::ToggleSplitMode);
-            acts.push(Act::Lang);
         }
+        acts.push(Act::VoiceDictation);
+        acts.push(Act::Copy);
+        acts.push(Act::Paste);
+        acts.push(Act::Cut);
+        acts.push(Act::Undo);
+        acts.push(Act::SelectAll);
+        acts.push(Act::EmojiPicker);
+        acts.push(Act::FlipPosition);
+        acts.push(Act::ToggleSplitMode);
+        acts.push(Act::Lang);
         acts
     }
 
@@ -1573,6 +1583,7 @@ impl VKbdApp {
         }
         self.reposition_rx = n.right_stick_x;
         self.reposition_ry = n.right_stick_y;
+        self.grid_nav_active = n.grid_nav_active;
         n.dx = n.dx.clamp(-1, 1);
         n.dy = n.dy.clamp(-1, 1);
         if self.rows.is_empty() {
@@ -1801,6 +1812,13 @@ impl VKbdApp {
 impl eframe::App for VKbdApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_typing_target(platform::foreground_hwnd());
+        let mouse_moved = ctx.input(|i| i.pointer.delta().length() > 2.0);
+        if mouse_moved {
+            self.grid_nav_active = false;
+            if let Ok(mut g) = self.nav.lock() {
+                g.grid_nav_active = false;
+            }
+        }
         self.frame = self.frame.wrapping_add(1);
         if self.frame <= 3 {
             crate::platform::log_debug(&format!(
@@ -2131,7 +2149,7 @@ impl eframe::App for VKbdApp {
                         let (active, locked) = self.key_state(kd.act);
                         let is_split_l = self.split_mode && !self.toolbar_focused && ri == self.left_cursor.0 && ci == self.left_cursor.1;
                         let is_split_r = self.split_mode && !self.toolbar_focused && ri == self.right_cursor.0 && ci == self.right_cursor.1;
-                        let is_foc = if self.split_mode {
+                        let is_foc = if self.split_mode || !self.grid_nav_active {
                             false
                         } else {
                             !self.toolbar_focused && ri == cr && ci == cc
@@ -2360,6 +2378,82 @@ fn paint_toolbar(
     let mut right_btns = Vec::new();
     let start_col = if has_clear { 1 } else { 0 };
 
+    let send_lbl = if is_ar {
+        crate::arabic::reshape_ar("⏎ إرسال")
+    } else {
+        "⏎ Send".to_string()
+    };
+    let copy_lbl = if is_ar {
+        crate::arabic::reshape_ar("📄 نسخ")
+    } else {
+        "📄 Copy".to_string()
+    };
+    let paste_lbl = if is_ar {
+        crate::arabic::reshape_ar("📋 لصق")
+    } else {
+        "📋 Paste".to_string()
+    };
+    let cut_lbl = if is_ar {
+        crate::arabic::reshape_ar("✂ قص")
+    } else {
+        "✂ Cut".to_string()
+    };
+    let undo_lbl = if is_ar {
+        crate::arabic::reshape_ar("↩ تراجع")
+    } else {
+        "↩ Undo".to_string()
+    };
+    let sel_all_lbl = if is_ar {
+        crate::arabic::reshape_ar("🔘 تحديد")
+    } else {
+        "🔘 SelAll".to_string()
+    };
+    let flip_lbl = if is_ar {
+        crate::arabic::reshape_ar("↕ رفع")
+    } else {
+        "↕ Flip".to_string()
+    };
+    let lang_lbl = if lang == Lang::En {
+        crate::arabic::reshape_ar("🌐 العربية")
+    } else {
+        "🌐 English".to_string()
+    };
+    let split_lbl = if split_mode {
+        if is_ar {
+            crate::arabic::reshape_ar("🎮 منقسم")
+        } else {
+            "🎮 Split".to_string()
+        }
+    } else {
+        if is_ar {
+            crate::arabic::reshape_ar("⌨ فردي")
+        } else {
+            "⌨ Single".to_string()
+        }
+    };
+
+    let add_shortcut = |btns: &mut Vec<RightBtn>, label: String, act: Act| {
+        let col = start_col + btns.len();
+        btns.push(RightBtn {
+            label,
+            act,
+            is_primary: false,
+            col_idx: col,
+        });
+    };
+    let add_common = |btns: &mut Vec<RightBtn>| {
+        add_shortcut(btns, voice_label.clone(), Act::VoiceDictation);
+        add_shortcut(btns, copy_lbl.clone(), Act::Copy);
+        add_shortcut(btns, paste_lbl.clone(), Act::Paste);
+        add_shortcut(btns, cut_lbl.clone(), Act::Cut);
+        add_shortcut(btns, undo_lbl.clone(), Act::Undo);
+        add_shortcut(btns, sel_all_lbl.clone(), Act::SelectAll);
+        add_shortcut(btns, "😊 Emoji".to_string(), Act::EmojiPicker);
+        add_shortcut(btns, flip_lbl.clone(), Act::FlipPosition);
+        add_shortcut(btns, split_lbl.clone(), Act::ToggleSplitMode);
+        add_shortcut(btns, lang_lbl.clone(), Act::Lang);
+    };
+
     if !typed_word.is_empty() {
         let preds = crate::predict::predict(typed_word, is_ar, 3);
         for (i, p) in preds.iter().enumerate() {
@@ -2376,157 +2470,26 @@ fn paint_toolbar(
         }
         let enter_col = start_col + preds.len();
         right_btns.push(RightBtn {
-            label: if is_ar {
-                crate::arabic::reshape_ar("⏎ إرسال")
-            } else {
-                "⏎ Send".to_string()
-            },
+            label: send_lbl,
             act: Act::Enter,
             is_primary: true,
             col_idx: enter_col,
         });
+        add_common(&mut right_btns);
     } else if has_clear {
-        let send_lbl = if is_ar {
-            crate::arabic::reshape_ar("⏎ إرسال")
-        } else {
-            "⏎ Send".to_string()
-        };
-        let paste_lbl = if is_ar {
-            crate::arabic::reshape_ar("📋 لصق")
-        } else {
-            "📋 Paste".to_string()
-        };
-        let flip_lbl = if is_ar {
-            crate::arabic::reshape_ar("↕ رفع")
-        } else {
-            "↕ Flip".to_string()
-        };
-        let lang_lbl = if lang == Lang::En {
-            crate::arabic::reshape_ar("🌐 العربية")
-        } else {
-            "🌐 English".to_string()
-        };
-
         right_btns.push(RightBtn {
             label: send_lbl,
             act: Act::Enter,
             is_primary: true,
             col_idx: start_col,
         });
-        right_btns.push(RightBtn {
-            label: voice_label,
-            act: Act::VoiceDictation,
-            is_primary: false,
-            col_idx: start_col + 1,
-        });
-        right_btns.push(RightBtn {
-            label: paste_lbl,
-            act: Act::Paste,
-            is_primary: false,
-            col_idx: start_col + 2,
-        });
-        let split_lbl = if split_mode {
-            if is_ar {
-                crate::arabic::reshape_ar("🎮 منقسم")
-            } else {
-                "🎮 Split".to_string()
-            }
-        } else {
-            if is_ar {
-                crate::arabic::reshape_ar("⌨ فردي")
-            } else {
-                "⌨ Single".to_string()
-            }
-        };
-
-        right_btns.push(RightBtn {
-            label: flip_lbl,
-            act: Act::FlipPosition,
-            is_primary: false,
-            col_idx: start_col + 3,
-        });
-        right_btns.push(RightBtn {
-            label: split_lbl.clone(),
-            act: Act::ToggleSplitMode,
-            is_primary: false,
-            col_idx: start_col + 4,
-        });
-        right_btns.push(RightBtn {
-            label: lang_lbl,
-            act: Act::Lang,
-            is_primary: false,
-            col_idx: start_col + 5,
-        });
+        add_common(&mut right_btns);
     } else {
-        let paste_lbl = if is_ar {
-            crate::arabic::reshape_ar("📋 لصق")
-        } else {
-            "📋 Paste".to_string()
-        };
-        let flip_lbl = if is_ar {
-            crate::arabic::reshape_ar("↕ رفع")
-        } else {
-            "↕ Flip".to_string()
-        };
-        let lang_lbl = if lang == Lang::En {
-            crate::arabic::reshape_ar("🌐 العربية")
-        } else {
-            "🌐 English".to_string()
-        };
-        let split_lbl = if split_mode {
-            if is_ar {
-                crate::arabic::reshape_ar("🎮 منقسم")
-            } else {
-                "🎮 Split".to_string()
-            }
-        } else {
-            if is_ar {
-                crate::arabic::reshape_ar("⌨ فردي")
-            } else {
-                "⌨ Single".to_string()
-            }
-        };
-
-        right_btns.push(RightBtn {
-            label: voice_label,
-            act: Act::VoiceDictation,
-            is_primary: false,
-            col_idx: start_col,
-        });
-        right_btns.push(RightBtn {
-            label: paste_lbl,
-            act: Act::Paste,
-            is_primary: false,
-            col_idx: start_col + 1,
-        });
-        right_btns.push(RightBtn {
-            label: flip_lbl,
-            act: Act::FlipPosition,
-            is_primary: false,
-            col_idx: start_col + 2,
-        });
-        right_btns.push(RightBtn {
-            label: "😊 Emoji".to_string(),
-            act: Act::EmojiPicker,
-            is_primary: false,
-            col_idx: start_col + 3,
-        });
-        right_btns.push(RightBtn {
-            label: split_lbl,
-            act: Act::ToggleSplitMode,
-            is_primary: false,
-            col_idx: start_col + 4,
-        });
-        right_btns.push(RightBtn {
-            label: lang_lbl,
-            act: Act::Lang,
-            is_primary: false,
-            col_idx: start_col + 5,
-        });
+        add_common(&mut right_btns);
     }
 
     // --- Left Section: Live Search & Typing Bar Capsule ---
-    let search_w = (rect.width() * 0.52).round();
+    let search_w = (rect.width() * 0.26).round();
     let search_rect = egui::Rect::from_min_size(
         egui::pos2(rect.left() + 2.0, rect.top() + 2.0),
         egui::vec2(search_w - 4.0, rect.height() - 4.0),
@@ -2599,7 +2562,7 @@ fn paint_toolbar(
             );
         }
 
-        if resp.clicked() {
+        if resp.clicked() || (hovered && ui.input(|i| i.pointer.primary_pressed())) {
             event.action = Some(Act::ClearTyped);
         }
     }
@@ -2750,7 +2713,7 @@ fn paint_toolbar(
             text_col,
         );
 
-        if resp.clicked() {
+        if resp.clicked() || (hovered && ui.input(|i| i.pointer.primary_pressed())) {
             event.action = Some(btn.act);
         }
     }

@@ -342,6 +342,8 @@ pub struct Engine {
     switcher_was_moving: bool,
     switcher_cooldown: f64,
     toggle_chord_down: bool,
+    nav_grid_active: bool,
+    nav_mouse_down: bool,
 }
 
 static PENDING_RUMBLE: Mutex<Option<(u16, u16, f64)>> = Mutex::new(None);
@@ -400,6 +402,8 @@ impl Engine {
             switcher_was_moving: false,
             switcher_cooldown: 0.0,
             toggle_chord_down: false,
+            nav_grid_active: false,
+            nav_mouse_down: false,
         };
         eng.rebuild_bindings();
         eng
@@ -901,9 +905,15 @@ impl Engine {
             // Leaving nav mode: suppress any buttons still physically held down
             // (e.g. L3 or B used to close the keyboard) until the user releases them!
             self.nav_active = false;
+            if self.nav_mouse_down {
+                mouse::button_up(mouse::MouseButton::Left);
+                self.nav_mouse_down = false;
+            }
+            self.nav_grid_active = false;
             if let Some(nav_arc) = &self.vk_nav {
                 if let Ok(mut nav) = nav_arc.lock() {
                     nav.clear_close_and_hide();
+                    nav.grid_nav_active = false;
                 }
             }
             self.nav_prev_buttons = 0;
@@ -1136,6 +1146,16 @@ impl Engine {
         let newly = b & !self.nav_prev_buttons;
 
         // Direction from D-pad (and left stick as an alternative).
+        let dpad_moving = (b & (B_DPAD_RIGHT | B_DPAD_LEFT | B_DPAD_DOWN | B_DPAD_UP)) != 0;
+        const MOUSE_MOVE_TH: i32 = 6000;
+        let stick_moved = (gp.sThumbLX as i32).abs() > MOUSE_MOVE_TH || (gp.sThumbLY as i32).abs() > MOUSE_MOVE_TH;
+
+        if dpad_moving {
+            self.nav_grid_active = true;
+        } else if stick_moved {
+            self.nav_grid_active = false;
+        }
+
         let mut dx: i32 = 0;
         let mut dy: i32 = 0;
         if b & B_DPAD_RIGHT != 0 {
@@ -1222,11 +1242,22 @@ impl Engine {
                     nav.rx += rdx;
                     nav.ry += rdy;
                 }
+                nav.grid_nav_active = self.nav_grid_active;
                 // Face buttons, mapped from the original `GetKeyboardModeBindings`:
-                // every pad button does something, and none of them closes the
-                // keyboard by accident.
+                // If D-pad navigation is active: Button A selects the highlighted grid key.
+                // If mouse pointer is being used: Button A sends native mouse left-click!
                 if newly & B_A != 0 {
-                    nav.select += 1;
+                    if self.nav_grid_active {
+                        nav.select += 1;
+                    } else {
+                        crate::platform::note_controller_left_click();
+                        mouse::button_down(mouse::MouseButton::Left);
+                        self.nav_mouse_down = true;
+                    }
+                }
+                if self.nav_mouse_down && (b & B_A == 0) {
+                    mouse::button_up(mouse::MouseButton::Left);
+                    self.nav_mouse_down = false;
                 }
                 let now = crate::steady_seconds();
                 // X button = Backspace with continuous hold-to-repeat (just like a physical keyboard!)
