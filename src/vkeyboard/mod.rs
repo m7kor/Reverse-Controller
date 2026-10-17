@@ -787,7 +787,11 @@ impl VKbdApp {
             Ok(mut g) => g.drain(),
             Err(_) => return false,
         };
-        self.grid_nav_active = n.grid_nav_active;
+        if n.dx != 0 || n.dy != 0 || n.jump_y != 0 {
+            self.grid_nav_active = true;
+        } else {
+            self.grid_nav_active = n.grid_nav_active;
+        }
 
         if self.demo {
             return false;
@@ -1017,6 +1021,13 @@ impl VKbdApp {
 impl eframe::App for VKbdApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_typing_target(platform::foreground_hwnd());
+        let pointer_delta = ctx.input(|i| i.pointer.delta().length());
+        if pointer_delta > 1.5 {
+            self.grid_nav_active = false;
+            if let Ok(mut g) = self.nav.lock() {
+                g.grid_nav_active = false;
+            }
+        }
         self.frame = self.frame.wrapping_add(1);
         if self.frame <= 3 {
             crate::platform::log_debug(&format!(
