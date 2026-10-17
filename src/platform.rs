@@ -851,6 +851,20 @@ pub fn enforce_overlay_style(title: &str) -> bool {
         let want = style | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
         if want != style {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+            const SWP_FRAMECHANGED: u32 = 0x0020;
+            const SWP_NOMOVE: u32 = 0x0002;
+            const SWP_NOSIZE: u32 = 0x0001;
+            const SWP_NOZORDER: u32 = 0x0004;
+            const SWP_NOACTIVATE: u32 = 0x0010;
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
         }
         // Enable Windows 11 immersive dark mode and rounded corner preference
         let dark_mode: BOOL = 1;
@@ -1003,11 +1017,14 @@ pub fn note_overlay(hwnd: usize) {
     }
 }
 
-/// Give focus back to the window captured by [`push_foreground`] ONLY if our
-/// overlay window accidentally became the foreground window.
-///
-/// Never uses `AttachThreadInput` or cross-process `SetFocus`, which can stall
-/// or freeze the UI thread when closing the keyboard.
+/// Update the tracked typing target window.
+pub fn set_foreground_target(hwnd: usize) {
+    if hwnd != 0 && hwnd != overlay_hwnd() {
+        FOREGROUND.store(hwnd, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Give focus back to the window captured by [`push_foreground`] or [`set_foreground_target`].
 pub fn restore_foreground() {
     let h = FOREGROUND.load(std::sync::atomic::Ordering::SeqCst);
     if h == 0 {
@@ -1016,9 +1033,7 @@ pub fn restore_foreground() {
     unsafe {
         let fg = GetForegroundWindow() as usize;
         let ov = overlay_hwnd();
-        // Since the overlay has WS_EX_NOACTIVATE, the target window already has
-        // focus 99.9% of the time. Only intervene if the overlay itself became foreground.
-        if (fg == 0 || (ov != 0 && fg == ov)) && IsWindow(h as HWND) != 0 {
+        if (fg == 0 || (ov != 0 && fg == ov) || fg != h) && IsWindow(h as HWND) != 0 {
             SetForegroundWindow(h as HWND);
         }
     }

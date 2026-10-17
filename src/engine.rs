@@ -1246,7 +1246,7 @@ impl Engine {
                     nav.select += 1;
                 }
                 let now = crate::steady_seconds();
-                const TRIGGER_TH: u8 = 60;
+                const TRIGGER_TH: u8 = 40;
                 let rt_held = gp.bRightTrigger > TRIGGER_TH;
 
                 // X button = Backspace (or Delete Whole Word if RT is held!)
@@ -1296,28 +1296,13 @@ impl Engine {
                         f.store(false, Ordering::SeqCst);
                     }
                 }
-                // Shoulders: Inverted per user request so L1 and R1 move caret in expected direction
-                // L1 (LB): Move caret right with continuous hold-to-repeat
+                // Shoulders: L1 (LB) moves caret left, R1 (RB) moves caret right
+                // L1 (LB): Move caret left with continuous hold-to-repeat
                 if newly & B_LEFT_SHOULDER != 0 {
-                    nav.caret_right += 1;
-                    self.nav_caret_right_down = now;
-                    self.nav_caret_right_next = now + 0.35;
-                } else if b & B_LEFT_SHOULDER != 0 {
-                    if self.nav_caret_right_down > 0.0 && now >= self.nav_caret_right_next {
-                        nav.caret_right += 1;
-                        self.nav_caret_right_next = now + 0.065;
-                    }
-                } else {
-                    self.nav_caret_right_down = 0.0;
-                    self.nav_caret_right_next = 0.0;
-                }
-
-                // R1 (RB): Move caret left with continuous hold-to-repeat
-                if newly & B_RIGHT_SHOULDER != 0 {
                     nav.caret_left += 1;
                     self.nav_caret_left_down = now;
                     self.nav_caret_left_next = now + 0.35;
-                } else if b & B_RIGHT_SHOULDER != 0 {
+                } else if b & B_LEFT_SHOULDER != 0 {
                     if self.nav_caret_left_down > 0.0 && now >= self.nav_caret_left_next {
                         nav.caret_left += 1;
                         self.nav_caret_left_next = now + 0.065;
@@ -1325,6 +1310,21 @@ impl Engine {
                 } else {
                     self.nav_caret_left_down = 0.0;
                     self.nav_caret_left_next = 0.0;
+                }
+
+                // R1 (RB): Move caret right with continuous hold-to-repeat
+                if newly & B_RIGHT_SHOULDER != 0 {
+                    nav.caret_right += 1;
+                    self.nav_caret_right_down = now;
+                    self.nav_caret_right_next = now + 0.35;
+                } else if b & B_RIGHT_SHOULDER != 0 {
+                    if self.nav_caret_right_down > 0.0 && now >= self.nav_caret_right_next {
+                        nav.caret_right += 1;
+                        self.nav_caret_right_next = now + 0.065;
+                    }
+                } else {
+                    self.nav_caret_right_down = 0.0;
+                    self.nav_caret_right_next = 0.0;
                 }
 
                 // Analogue triggers:

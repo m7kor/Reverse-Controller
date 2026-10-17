@@ -227,7 +227,7 @@ impl VKbdApp {
             layer: Layer::Abc,
             shift: ShiftState::Off,
             last_shift_tap: None,
-            cursor: (0, 0),
+            cursor: (2, 4),
             goal_x,
             rows,
             dirty: false,
@@ -288,6 +288,7 @@ impl VKbdApp {
     pub fn sync_typing_target(&mut self, hwnd: usize) {
         if hwnd != 0 && hwnd != platform::overlay_hwnd() && hwnd != self.typing_target {
             self.typing_target = hwnd;
+            platform::set_foreground_target(hwnd);
             self.typed_buffer.clear();
             self.typed_word.clear();
         }
@@ -318,6 +319,7 @@ impl VKbdApp {
         self.drag_anchor = None;
         self.toolbar_focused = false;
         self.toolbar_col = 0;
+        self.cursor = (2, 4);
         self.key.release_all();
         if self.layer != Layer::Abc {
             self.layer = Layer::Abc;
@@ -614,7 +616,8 @@ impl VKbdApp {
         );
         if sends_input {
             let cur = platform::foreground_hwnd();
-            if cur == 0 || cur == platform::overlay_hwnd() {
+            let ov = platform::overlay_hwnd();
+            if cur == 0 || (ov != 0 && cur == ov) || (self.typing_target != 0 && cur != self.typing_target) {
                 platform::restore_foreground();
             }
         }
@@ -655,6 +658,7 @@ impl VKbdApp {
             .unwrap_or(false);
         self.shift = self.shift.tap(double);
         self.last_shift_tap = Some(now);
+        self.dirty = true;
     }
 
     pub fn get_toolbar_actions(&self) -> Vec<Act> {
@@ -848,31 +852,7 @@ impl VKbdApp {
             if n.select > 0 {
                 self.activate_toolbar_focused();
             }
-            if n.backspace > 0 {
-                self.perform_in_context(Act::Backspace);
-            }
-            if n.delete_word > 0 {
-                self.perform_in_context(Act::DeleteWord);
-            }
-            if n.space > 0 {
-                self.perform_in_context(Act::Space);
-            }
-            if n.accept_prediction > 0 {
-                self.accept_top_prediction();
-            }
-            if n.enter > 0 {
-                self.perform_in_context(Act::Enter);
-            }
-            if n.shift_enter > 0 {
-                self.perform_in_context(Act::ShiftEnter);
-            }
-            if n.close > 0 || n.hide > 0 {
-                self.hide();
-            }
-            return !self.visible.load(Ordering::SeqCst);
-        }
-
-        if r == 0 && (n.dy < 0 || n.jump_y < 0) {
+        } else if r == 0 && (n.dy < 0 || n.jump_y < 0) {
             self.toolbar_focused = true;
             let acts = self.get_toolbar_actions();
             self.toolbar_col = if !self.typed_word.is_empty() && !self.typed_buffer.is_empty() && acts.len() > 1 {
@@ -880,108 +860,109 @@ impl VKbdApp {
             } else {
                 0
             };
-            return false;
-        }
+        } else {
+            if n.toggle_split > 0 {
+                self.execute_action(Act::ToggleSplitMode);
+            }
 
-        if n.toggle_split > 0 {
-            self.execute_action(Act::ToggleSplitMode);
-        }
+            if self.split_mode {
+                let (mut lr, mut lc) = self.left_cursor;
+                let (mut rr, mut rc) = self.right_cursor;
+                lr = lr.min((nrows - 1) as usize);
+                rr = rr.min((nrows - 1) as usize);
+                let left_mid = (self.rows[lr].len() / 2).max(1);
+                let right_mid = self.rows[rr].len() / 2;
+                lc = lc.min(left_mid.saturating_sub(1));
+                rc = rc.clamp(right_mid, self.rows[rr].len().saturating_sub(1));
 
-        if self.split_mode {
-            let (mut lr, mut lc) = self.left_cursor;
-            let (mut rr, mut rc) = self.right_cursor;
-            lr = lr.min((nrows - 1) as usize);
-            rr = rr.min((nrows - 1) as usize);
-            let left_mid = (self.rows[lr].len() / 2).max(1);
-            let right_mid = self.rows[rr].len() / 2;
-            lc = lc.min(left_mid.saturating_sub(1));
-            rc = rc.clamp(right_mid, self.rows[rr].len().saturating_sub(1));
-
-            if n.dx != 0 {
-                let span = left_mid as i32;
-                if span > 0 {
-                    lc = wrap(lc as i32 + n.dx, span) as usize;
-                    self.goal_x_left = key_center(&self.rows[lr], lc);
+                if n.dx != 0 {
+                    let span = left_mid as i32;
+                    if span > 0 {
+                        lc = wrap(lc as i32 + n.dx, span) as usize;
+                        self.goal_x_left = key_center(&self.rows[lr], lc);
+                        self.last_cursor_moved = 0;
+                    }
+                }
+                if n.dy != 0 {
+                    lr = wrap(lr as i32 + n.dy, nrows) as usize;
+                    let mid = (self.rows[lr].len() / 2).max(1);
+                    lc = nearest_col_clamped(&self.rows[lr], self.goal_x_left, 0, mid);
                     self.last_cursor_moved = 0;
                 }
-            }
-            if n.dy != 0 {
-                lr = wrap(lr as i32 + n.dy, nrows) as usize;
-                let mid = (self.rows[lr].len() / 2).max(1);
-                lc = nearest_col_clamped(&self.rows[lr], self.goal_x_left, 0, mid);
-                self.last_cursor_moved = 0;
-            }
 
-            if n.rx != 0 {
-                let span = (self.rows[rr].len() - right_mid) as i32;
-                if span > 0 {
-                    rc = right_mid + wrap((rc - right_mid) as i32 + n.rx, span) as usize;
-                    self.goal_x_right = key_center(&self.rows[rr], rc);
+                if n.rx != 0 {
+                    let span = (self.rows[rr].len() - right_mid) as i32;
+                    if span > 0 {
+                        rc = right_mid + wrap((rc - right_mid) as i32 + n.rx, span) as usize;
+                        self.goal_x_right = key_center(&self.rows[rr], rc);
+                        self.last_cursor_moved = 1;
+                    }
+                }
+                if n.ry != 0 {
+                    rr = wrap(rr as i32 + n.ry, nrows) as usize;
+                    let mid = self.rows[rr].len() / 2;
+                    rc = nearest_col_clamped(&self.rows[rr], self.goal_x_right, mid, self.rows[rr].len());
                     self.last_cursor_moved = 1;
                 }
-            }
-            if n.ry != 0 {
-                rr = wrap(rr as i32 + n.ry, nrows) as usize;
-                let mid = self.rows[rr].len() / 2;
-                rc = nearest_col_clamped(&self.rows[rr], self.goal_x_right, mid, self.rows[rr].len());
-                self.last_cursor_moved = 1;
-            }
 
-            self.left_cursor = (lr, lc);
-            self.right_cursor = (rr, rc);
+                self.left_cursor = (lr, lc);
+                self.right_cursor = (rr, rc);
 
-            if n.select_left > 0 {
-                if let Some(kd) = self.rows.get(lr).and_then(|row| row.get(lc)) {
-                    let a = kd.act;
-                    self.flash = Some(((lr, lc), Instant::now()));
-                    self.perform_in_context(a);
+                if n.select_left > 0 {
+                    if let Some(kd) = self.rows.get(lr).and_then(|row| row.get(lc)) {
+                        let a = kd.act;
+                        self.flash = Some(((lr, lc), Instant::now()));
+                        self.perform_in_context(a);
+                    }
                 }
-            }
-            if n.select_right > 0 {
-                if let Some(kd) = self.rows.get(rr).and_then(|row| row.get(rc)) {
-                    let a = kd.act;
-                    self.flash = Some(((rr, rc), Instant::now()));
-                    self.perform_in_context(a);
+                if n.select_right > 0 {
+                    if let Some(kd) = self.rows.get(rr).and_then(|row| row.get(rc)) {
+                        let a = kd.act;
+                        self.flash = Some(((rr, rc), Instant::now()));
+                        self.perform_in_context(a);
+                    }
                 }
-            }
-        } else {
-            let row_len = self.rows[r].len() as i32;
-            if n.dx != 0 && row_len > 0 {
-                c = wrap(c as i32 + n.dx, row_len) as usize;
-                self.goal_x = key_center(&self.rows[r], c);
-            }
-            if n.dy != 0 || n.jump_y != 0 {
-                let delta = n.dy + n.jump_y;
-                r = wrap(r as i32 + delta, nrows) as usize;
-                c = nearest_col(&self.rows[r], self.goal_x);
-            }
-        }
-
-        if n.select > 0 && !self.split_mode {
-            let (fr, fc) = if self.split_mode {
-                if self.last_cursor_moved == 0 { self.left_cursor } else { self.right_cursor }
             } else {
-                (r, c)
-            };
-            if let Some(kd) = self.rows.get(fr).and_then(|row| row.get(fc)) {
-                let a = kd.act;
-                self.flash = Some(((fr, fc), Instant::now()));
-                self.perform_in_context(a);
+                let row_len = self.rows[r].len() as i32;
+                if n.dx != 0 && row_len > 0 {
+                    c = wrap(c as i32 + n.dx, row_len) as usize;
+                    self.goal_x = key_center(&self.rows[r], c);
+                }
+                if n.dy != 0 || n.jump_y != 0 {
+                    let delta = n.dy + n.jump_y;
+                    r = wrap(r as i32 + delta, nrows) as usize;
+                    c = nearest_col(&self.rows[r], self.goal_x);
+                }
+
+                if n.select > 0 {
+                    let (fr, fc) = (r, c);
+                    if let Some(kd) = self.rows.get(fr).and_then(|row| row.get(fc)) {
+                        let a = kd.act;
+                        self.flash = Some(((fr, fc), Instant::now()));
+                        self.perform_in_context(a);
+                    }
+                }
             }
         }
-        for _ in 0..n.shift {
-            self.tap_shift();
-        }
-        for _ in 0..n.altgr {
-            self.altgr = !self.altgr;
-        }
+
+        // Global controller shortcuts — active everywhere on the keyboard:
         if n.layer > 0 {
+            crate::sound::play_sfx(crate::sound::SoundEffect::RadialSnap);
+            crate::engine::trigger_haptic(8000, 11000, 0.03);
             self.layer = match self.layer {
                 Layer::Abc => Layer::Num,
                 Layer::Num => Layer::Abc,
                 Layer::Edit => Layer::Abc,
             };
             self.dirty = true;
+        }
+        for _ in 0..n.shift {
+            crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
+            crate::engine::trigger_haptic(7500, 9500, 0.025);
+            self.tap_shift();
+        }
+        for _ in 0..n.altgr {
+            self.altgr = !self.altgr;
         }
         if n.lang > 0 {
             self.perform_in_context(Act::Lang);
@@ -992,9 +973,13 @@ impl VKbdApp {
             crate::engine::trigger_haptic(10000, 14000, 0.04);
         }
         for _ in 0..n.caret_left.min(4) {
+            crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
+            crate::engine::trigger_haptic(6000, 8000, 0.02);
             self.perform_in_context(Act::Key(NavKey::Left));
         }
         for _ in 0..n.caret_right.min(4) {
+            crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
+            crate::engine::trigger_haptic(6000, 8000, 0.02);
             self.perform_in_context(Act::Key(NavKey::Right));
         }
         for _ in 0..n.backspace.min(2) {
@@ -1032,13 +1017,6 @@ impl VKbdApp {
 impl eframe::App for VKbdApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_typing_target(platform::foreground_hwnd());
-        let mouse_moved = ctx.input(|i| i.pointer.delta().length() > 2.0);
-        if mouse_moved {
-            self.grid_nav_active = false;
-            if let Ok(mut g) = self.nav.lock() {
-                g.grid_nav_active = false;
-            }
-        }
         self.frame = self.frame.wrapping_add(1);
         if self.frame <= 3 {
             crate::platform::log_debug(&format!(

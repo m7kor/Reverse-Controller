@@ -335,7 +335,8 @@ impl KeyPresser {
             inputs.push(w32::key_input(0, u, w32::KEYEVENTF_UNICODE));
             inputs.push(w32::key_input(0, u, w32::KEYEVENTF_UNICODE | w32::KEYEVENTF_KEYUP));
         }
-        w32::send_inputs(&inputs);
+        let sent = w32::send_inputs(&inputs);
+        crate::platform::log_debug(&format!("[keys] send_char '{c}' -> sent={sent}/{}", inputs.len()));
     }
 
     /// Inject a string atomically in a single SendInput batch (layout-independent Unicode).
