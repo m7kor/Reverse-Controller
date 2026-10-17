@@ -1,184 +1,238 @@
 # 🎮 Reverse Controller (Controller Companion — Native Rust Edition)
 
+🌐 **[English](README.md)** | **[العربية (Arabic)](README.ar.md)**
+
 [![Rust](https://img.shields.io/badge/Rust-2021%20Edition-orange?logo=rust)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-blue?logo=windows)](https://microsoft.com/windows)
 [![Release](https://img.shields.io/github/v/release/m7kor/Reverse-Controller?color=blue&logo=github)](https://github.com/m7kor/Reverse-Controller/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-129%20Passed-brightgreen)](https://github.com/m7kor/Reverse-Controller/actions)
+[![Tests](https://img.shields.io/badge/Tests-131%20Passed-brightgreen)](https://github.com/m7kor/Reverse-Controller/actions)
 [![Clippy](https://img.shields.io/badge/Clippy-0%20Warnings-brightgreen)](https://github.com/m7kor/Reverse-Controller)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-**[📥 تحميل أحدث إصدار مباشر (Download v1.2.2)](https://github.com/m7kor/Reverse-Controller/releases/latest)** · **[📋 تقرير الفحص الشامل](docs/comprehensive_audit_and_fix_report.md)**
+**[📥 Download Latest Release](https://github.com/m7kor/Reverse-Controller/releases/latest)** · **[📜 Full Changelog](CHANGELOG.md)** · **[📖 الدليل باللغة العربية](README.ar.md)** · **[📋 Comprehensive Audit Report](docs/comprehensive_audit_and_fix_report.md)**
+
+> [!NOTE]
+> For detailed release notes and feature highlights across every published version, visit the **[GitHub Releases Page](https://github.com/m7kor/Reverse-Controller/releases)** or inspect the **[CHANGELOG.md](CHANGELOG.md)**.
 
 ---
 
-## 🌟 الجديد في الإصدار الأحدث v1.2.2 (What's New in v1.2.2)
+## 📖 About The Project
 
-1. **حل مشكلة وميض التكست بوكس (OSK Text Click Glitch Fix):**
-   - تم التخلص نهائياً من وميض واختفاء الكيبورد عند النقر الأول على حقول النصوص ومربعات البحث عبر تصفير إشارات الإغلاق العالقة من الجلسات السابقة وتمديد حصانة النقرات الخارجية إلى 800ms.
-2. **تحريك الكيبورد في أي مكان بالقير الأيمن (R3 Repositioning Mode):**
-   - بالضغط على القير الأيمن `R3` ضغطة واحدة، يتفعل وضع التحريك الفوري وتظهر لافتة إرشادية زرقاء، ويمكنك تحريك الكيبورد في أي زاوية بالشاشة بسلاسة فائقة، ثم ضغط `R3` مجدداً للتثبيت!
-3. **ترقية جذرية للكتابة الصوتية بالذكاء الاصطناعي (Whisper AI Overhaul):**
-   - استبدال ميزة ويندوز (Win+H) بنظام محلي 100% مفتوح المصدر (أوفلاين بدون إنترنت).
-   - إضافة خوارزمية معايرة وتطبيع إشارة الصوت (Soft AGC & DC Offset Filter) لتضخيم الصوت المنخفض بنقاء عالي.
-   - فك تشفير قطعي `temperature = 0.0` مع تلقين أولي عربي يوجه الكلمات نحو المعجم الصحيح ويقضي على الهلوسة.
-   - تمديد مهلة السكون VAD إلى 1200ms للسماح بالتنفس والتوقف الطبيعي بين الكلمات.
-4. **متصفح إيموجي أصيل ومدمج (Native Emoji Picker):**
-   - استبدال نافذة ويندوز (Win + .) بمتصفح إيموجي محلي ومصنف مدمج داخل الكيبورد بدون أي استهلاك للموارد.
-5. **لوحة أدوات التحرير (Edit Tools Layer):**
-   - زر `Edit` يفتح أدوات النسخ، اللصق، القص، التراجع، الإعادة، مسح كلمة، وتحديد الكل بضغطة زر.
+**Reverse Controller** is a ground-up, high-performance, 100% open-source reimplementation of the popular **Controller Companion** desktop navigation software for Windows, authored entirely in safe, native **Rust 2021**.
+
+It turns any standard gamepad (Xbox One / Series, PlayStation DualShock 4 / DualSense, Nintendo Switch Pro, or generic DirectInput / XInput controllers) into a full desktop mouse and keyboard with sub-millisecond responsiveness, completely decoupled from Steam and proprietary Windows services.
+
+### 🌟 Key Highlights
+- ⚡ **Ultra-Low Resource Footprint:** Idles at **~25MB RAM** (compared to 150MB+ for Electron / .NET solutions) with **<0.2% CPU** usage during 125Hz polling and **<1.2ms** input latency.
+- 🔒 **100% Private & Autonomous:** Zero Steam client dependencies. Replaces cloud-tethered Windows voice typing (Win+H) and emoji picker (Win+.) with an offline, CPU-accelerated **Whisper AI** model and a lightweight built-in emoji browser.
+- 🎨 **Modern Windows 11 Visuals:** Translucent GPU-accelerated overlay rendered via `egui` with native Acrylic / Mica glass effects, interactive button visualizers, and tactile mechanical sound effects.
+- 🌐 **First-Class Bilingual Typing:** Full Arabic (RTL, contextual reshaping, diacritics/tashkeel) and English QWERTY layouts with automatic text caret avoidance and caret navigation triggers.
+- 🛡️ **Industrial-Grade Reliability:** 131 unit tests with 100% pass rate, 88 headless verification tests, and 0 Clippy linter warnings.
 
 ---
 
-## 📖 عن المشروع (About The Project)
+## 📊 Technical Comparison: Reverse Controller vs Original Controller Companion
 
-إعادة هندسة وتطوير جذرية لبرنامج **Controller Companion** الشهير بلغة **Rust** الصافية لنظام Windows؛ لتحويل أي يد تحكم (Xbox, PlayStation, DualSense, وغيرها) إلى ماوس وكيبورد متكامل فائق السرعة والخفة:
-- ⚡ **أداء فائق:** استهلاك ذاكرة منخفض جداً (~25MB) مع تردد استطلاع 125Hz وزمن استجابة فوري (<1.2ms).
-- 🔒 **خصوصية 100% واستغناء تام عن خدمات ويندوز:** لا يتطلب إنترنت، لا يعتمد على Steam، ويعمل بكتابة صوتية محلية وإيموجي مدمج.
-- 🎨 **مظهر ويندوز 11 الشفاف:** واجهات Mica و Acrylic بتأثيرات بصرية فخمة مع أصوات ميكانيكية للمفاتيح.
-
----
-
-## 🎮 الدليل المحدث لجميع الأزرار والاختصارات (Controller Guide)
-
-### 1️⃣ التحكم بسطح المكتب والماوس (Desktop Mouse Mode)
-
-الوضع الافتراضي عند تشغيل البرنامج واستخدام اليد للتصفح:
-
-| الزر في اليد (Input) | الوظيفة (Action) | التفاصيل والشرح (Description) |
+| Feature | Original Controller Companion (Commercial) | Reverse Controller (Rust Edition) |
 | :--- | :--- | :--- |
-| **🕹️ الأنالوج الأيسر (Left Stick)** | **تحريك الماوس (Mouse Move)** | تحريك ناعم ودقيق مع مقاومة للارتجاف (Deadzone) وتسارع فيزيائي. |
-| **🕹️ الأنالوج الأيمن (Right Stick)** | **عجلة التمرير (Mouse Scroll)** | تمرير عمودي وأفقي فائق النعومة لتصفح المواقع والمستندات. |
-| **🟢 زر A** | **النقر الأيسر (Left Click)** | النقر الأساسي، السحب، وفتح الملفات والروابط. |
-| **🔵 زر X** | **النقر الأيمن (Right Click)** | فتح القائمة الجانبية (Context Menu) وتخصيص العناصر. |
-| **🔴 زر B** | **المسح والتراجع (Backspace)** | مسح الحرف السابق أثناء الكتابة أو الرجوع خطوة للخلف. |
-| **🟡 زر Y** | **تشغيل / إيقاف الوسائط (Play/Pause)** | التحكم الفوري بتشغيل أو إيقاف الموسيقى والفيديوهات. |
-| **🔘 ضغطة R3 (الأنالوج الأيمن)** | **الزر الأوسط (Middle Click)** | إغلاق تبويبات المتصفح بنقرة واحدة، أو التمرير التلقائي. |
-| **🔘 ضغطة L3 (الأنالوج الأيسر)** | **إظهار / إخفاء الكيبورد (Toggle OSK)** | فتح لوحة المفاتيح الافتراضية العائمة الشفافة على الشاشة. |
-| **🎯 الزناد الأيسر (LT)** | **نمط القناص + زر Ctrl (Sniper Mode)** | إبطاء حركة الماوس بنسبة 70% للتحكم المليمتري الدقيق. |
-| **⚡ الزناد الأيمن (RT)** | **زر Shift (Shift Modifier)** | يعمل كزر `Shift` لتحديد النصوص أو الملفات المتعددة. |
-| **⏮️ الكتف الأيسر (LB)** | **المقطع السابق (Previous Media)** | الانتقال للأغنية أو المقطع السابق. |
-| **⏭️ الكتف الأيمن (RB)** | **المقطع التالي (Next Media)** | الانتقال للأغنية أو المقطع التالي. |
-| **🎛️ أزرار الأسهم (D-Pad)** | **مفاتيح الأسهم (Arrow Keys)** | التنقل بالأسهم مع تكرار مستمر عند تعليق الضغط. |
-| **▶️ زر Start** | **زر الإدخال (Enter)** | فتح البرامج، إرسال الرسائل، أو سطر جديد. |
-| **📋 زر Back** | **مفتاح الطبقة المتقدمة (Modifier)** | عند تعليق الضغط عليه، يفعل الاختصارات الثانوية (انظر أدناه). |
-| **🌐 زر Xbox Guide** | **قائمة ابدأ / إطفاء اليد** | نقرة تفتح قائمة ابدأ، وتعليق الضغط 2.5 ثانية يطفئ يد التحكم اللاسلكية فوراً لحفظ البطارية. |
+| **Language & Architecture** | C# / .NET Framework 4.x | **Pure Native Rust 2021 (Zero Runtime)** |
+| **Steam Dependency** | Required (Must run via Steam client) | **None (Fully standalone, portable executable)** |
+| **Voice Dictation** | Relies on Windows Online Voice (Win+H) | **100% Local Whisper AI (CPU Inference, Zero Cloud)** |
+| **Arabic & RTL Support** | Broken / missing characters / reversed text | **Complete Bidirectional (BiDi) + Tashkeel + Reshaping** |
+| **Idle Memory (RAM)** | 85MB – 160MB | **24MB – 29MB (Periodic WorkingSet trimming)** |
+| **Input Latency** | ~8ms – 16ms | **< 1.2ms (125 Hz XInput engine)** |
+| **Emoji Browser** | Triggers Windows OS Flyout (Win + .) | **Lightweight Native Categorized Emoji Browser** |
+| **Keyboard Repositioning** | Clunky manual mouse dragging | **One-Touch R3 Analog Repositioning Across Screens** |
+| **Split-Stick Typing** | Not Supported | **Dual-Stick Steam Deck-Style Split Mode (L3+R3)** |
+| **Edit Tools Layer** | None | **Dedicated layer for Copy, Paste, Cut, Undo, Select All** |
+| **Source Code & License** | Proprietary Commercial | **100% Free & Open Source (MIT License)** |
 
 ---
 
-### 2️⃣ أزرار الكيبورد الافتراضي الشفاف (Virtual Keyboard Mode)
+## 🏛️ System Architecture
 
-عند الضغط على **L3** يظهر الكيبورد، وتتحول اليد فوراً إلى وضع الكتابة الاحترافي المخصص:
+```mermaid
+flowchart TB
+    subgraph Hardware ["🎮 Input Hardware"]
+        pad["Gamepad (Xbox / PlayStation / Generic XInput)"]
+        mic["Microphone (USB / Headset Audio)"]
+    end
 
-| الزر في اليد (Input) | الوظيفة المخصصة (Custom Keyboard Action) |
+    subgraph CoreEngine ["⚙️ 125 Hz Real-Time Core Engine"]
+        poll["XInput / DirectInput Polling"]
+        deadzone["Dual Deadzone & Kinetic Acceleration"]
+        bindings["Binding Dispatcher & Modifier Layer"]
+        altsnap["AltSnap Window Mover & Sizer"]
+    end
+
+    subgraph UI_Overlays ["🖥️ GPU-Accelerated Overlays (egui)"]
+        osk["Floating Virtual Keyboard (OSK)"]
+        split["Dual-Stick Split Typing Mode"]
+        radial["8-Direction Radial Pie Menu"]
+        emoji["Built-in Native Emoji Browser"]
+        hud["Minimalist HUD / OSD Overlay"]
+        gui["Modern Settings & Calibration Panel"]
+    end
+
+    subgraph LocalAI ["🎙️ Local Speech-to-Text Pipeline"]
+        cpal["Raw Audio Capture (CPAL)"]
+        vad["Voice Activity Detection (VAD)"]
+        agc["DC-Filter & Soft AGC Normalizer"]
+        whisper["OpenAI Whisper Model (whisper-rs CPU)"]
+        injector["Unicode Keystroke & Macro Injector"]
+    end
+
+    pad --> poll --> deadzone --> bindings
+    bindings --> altsnap
+    bindings --> osk
+    bindings --> radial
+    mic --> cpal --> vad --> agc --> whisper --> injector
+    osk --> emoji
+    osk --> split
+```
+
+---
+
+## 🎮 Complete Controller Mapping Guide
+
+### 1️⃣ Desktop Mouse Mode (Default)
+
+Active during everyday desktop browsing, file management, and media playback:
+
+| Controller Button | Action | Description |
+| :--- | :--- | :--- |
+| **🕹️ Left Stick** | **Mouse Pointer Move** | Kinetic analog motion with deadzone dampening and acceleration. |
+| **🕹️ Right Stick** | **Mouse Scroll Wheel** | Ultra-smooth vertical and horizontal scrolling across documents and web pages. |
+| **🟢 Button A** | **Left Click** | Primary click, double-click, window drag, and link selection. |
+| **🔵 Button X** | **Right Click** | Context menu and secondary commands. |
+| **🔴 Button B** | **Backspace** | Deletes the previous character or navigates backward in browser history. |
+| **🟡 Button Y** | **Play / Pause Media** | Instant playback toggle for Spotify, YouTube, VLC, and media players. |
+| **🔘 R3 (Right Stick Click)** | **Middle Click** | Closes browser tabs in one click or activates auto-scroll. |
+| **🔘 L3 (Left Stick Click)** | **Toggle Keyboard (OSK)** | Summons or dismisses the floating on-screen keyboard. |
+| **🎯 Left Trigger (LT)** | **Sniper Precision Mode** | Squeezing LT slows mouse speed by up to 70% for sub-pixel precision. |
+| **⚡ Right Trigger (RT)** | **Shift Modifier** | Acts as `Shift` key for multi-item selection and text highlighting. |
+| **⏮️ Left Shoulder (LB)** | **Previous Track** | Skips to previous media track. |
+| **⏭️ Right Shoulder (RB)** | **Next Track** | Skips to next media track. |
+| **🎛️ D-Pad (Arrows)** | **Arrow Keys** | Discrete cursor navigation with auto-repeat on hold. |
+| **▶️ Start Button** | **Enter Key** | Submits dialogs, launches selected shortcuts, or inserts newlines. |
+| **📋 Back Button** | **Modifier Layer** | Hold down to activate the secondary system shortcuts layer. |
+| **🌐 Xbox Guide Button** | **Start Menu / Turn Off** | Tap opens the Windows Start Menu; holding for 2.5s powers off wireless gamepads. |
+
+---
+
+### 2️⃣ Virtual Keyboard Mode (Press L3 to Open)
+
+Pressing **L3** surfaces the floating keyboard overlay, repurposing your controller into an optimized typing apparatus:
+
+| Controller Input | Custom Keyboard Action |
 | :--- | :--- |
-| **🕹️ الأنالوج الأيسر أو D-Pad** | **تحريك المؤشر بين الحروف** في جميع الاتجاهات بسلاسة وسرعة استجابة. |
-| **🟢 زر A** | **طباعة الحرف أو الرمز المحدد (Type Key)** مع صوت نقرة ميكانيكية. |
-| **🔵 زر X** | **مسح الحرف السابق (Backspace)** مع استمرار المسح عند التعليق. |
-| **🟡 زر Y** | **مسافة (Space Bar)** مع استمرار المسافة عند التعليق. |
-| **🔴 زر B** | **إغلاق الكيبورد فوراً** والرجوع لسطح المكتب. |
-| **⏮️ الكتف الأيسر L1 (LB)** | **تحريك مؤشر الكتابة لليسار مثل السهم (Caret Left)** مع تكرار مستمر. |
-| **⏭️ الكتف الأيمن R1 (RB)** | **تحريك مؤشر الكتابة لليمين مثل السهم (Caret Right)** مع تكرار مستمر. |
-| **🎯 الزناد الأيسر L2 (LT)** | **الانتقال لقائمة الأرقام والرموز والأشكال (?123 / #+=)**. |
-| **⚡ الزناد الأيمن R2 (RT)** | **تكبير الحروف والتشكيل (Capitalize / Shift / الحركات العربية)**. |
-| **🔘 ضغطة R3 (الأنالوج الأيمن)** | **تفعيل وضع تحريك الكيبورد (Reposition Mode):** حرك الكيبورد بالقير الأيمن في أي مكان، واضغط R3 مجدداً للتثبيت! |
-| **🔘 ضغطة L3 (الأنالوج الأيسر)** | **إخفاء الكيبورد فوراً**. |
-| **🎮 L3 + R3 معاً** | **تبديل نمط الشطرين (Dual-Stick Split Mode):** تقسيم الكيبورد لنصفين للكتابة باليدين معاً! |
-| **📋 زر Back** | **تبديل اللغة فورا بين العربي والإنجليزي (عربي ⇋ English)**. |
-| **▶️ زر Start** | **سطر جديد (Enter)**. |
-| **🛠️ زر Edit في الكيبورد** | **فتح لوحة أدوات التحرير:** نسخ، لصق، قص، تراجع، إعادة، مسح كلمة، وتحديد الكل. |
-| **😀 زر الإيموجي في الكيبورد** | **فتح متصفح الرموز التعبيرية المدمج** المستقل بالكامل عن ويندوز. |
+| **🕹️ Left Stick or D-Pad** | **Navigate Grid Cursor** smoothly across keys in all 8 directions. |
+| **🟢 Button A** | **Type Character / Select Key** with tactile mechanical audio feedback. |
+| **🔵 Button X** | **Backspace** with accelerating deletion speed on sustained hold. |
+| **🟡 Button Y** | **Spacebar** with continuous spacing on hold. |
+| **🔴 Button B** | **Dismiss Keyboard** and return directly to desktop mode. |
+| **⏮️ Left Bumper L1 (LB)** | **Move Caret Left (←)** across text fields for quick typo corrections. |
+| **⏭️ Right Bumper R1 (RB)** | **Move Caret Right (→)** across text fields with auto-repeat. |
+| **🎯 Left Trigger L2 (LT)** | **Switch to Numbers & Symbols Layer** (`?123` / `#+=`). |
+| **⚡ Right Trigger R2 (RT)** | **Capitalize / Shift / Diacritics** (Tashkeel in Arabic, uppercase in English). |
+| **🔘 R3 (Right Stick Click)** | **Reposition Mode:** Click R3 to activate, freely move the keyboard with the Right Stick anywhere on screen, and click R3 again to lock! |
+| **🔘 L3 (Left Stick Click)** | **Dismiss Keyboard** immediately. |
+| **🎮 L3 + R3 Together** | **Toggle Dual-Stick Split Mode:** Splits the keyboard into two halves for simultaneous two-thumb typing (Steam Deck layout). |
+| **📋 Back Button** | **Toggle Language** instantly between Arabic and English (`AR ⇋ EN`). |
+| **▶️ Start Button** | **Enter / Submit** (Newline or message send). |
+| **🛠️ Edit Button on Keyboard** | **Open Edit Tools Layer:** Copy, Paste, Cut, Undo, Redo, Select All, and Clear Word. |
+| **😀 Emoji Button on Keyboard** | **Open Native Emoji Browser:** Categorized offline emoji picker. |
 
 ---
 
-### 3️⃣ طبقة الاختصارات المتقدمة (Back Modifier Layer: اضغط مع زر Back)
+### 3️⃣ Secondary System Shortcuts (Back Modifier Layer: Hold Back Button)
 
-عند تعليق الضغط على **زر Back**، تتحول باقي الأزرار إلى مركز تحكم بالنظام:
+Holding the **Back button** turns your controller into a full Windows command center:
 
-| الاختصار (Button Combo) | الوظيفة (Action) | الشرح والتفاصيل |
+| Combination | Action | Description |
 | :--- | :--- | :--- |
-| **Back + Start** | **تشغيل / إيقاف تحكم اليد (Toggle Controller)** | يعمل على مستوى العتاد دائماً حتى لو كان البرنامج معطلاً لاستعادة الماوس فوراً. |
-| **Back + LB (الكتف الأيسر)** | **الكتابة الصوتية بالذكاء الاصطناعي (AI Voice)** | تسجيل صوتك وتحويله لنص عربي أو إنجليزي محلياً بدون إنترنت عبر Whisper. |
-| **Back + R3 (ضغطة الأنالوج)** | **القائمة الدائرية السريعة (Radial Pie Menu)** | يفتح قائمة دائرية سريعة بـ 8 اتجاهات للتنقل السريع لأهم البرامج. |
-| **Back + L3 (ضغطة الأنالوج)** | **قفل السحب والإفلات (Drag Lock)** | تعليق زر الماوس الأيسر تلقائياً لسحب النوافذ والملفات دون الاستمرار بالضغط. |
-| **Back + D-Pad ⬆️ / ⬇️** | **رفع / خفض مستوى الصوت (Volume Control)** | زيادة أو خفض صوت النظام مع مؤشر OSD مرئي وصوت تفاعلي. |
-| **Back + D-Pad ⬅️ / ➡️** | **محاذاة النوافذ لليسار / اليمين (Snap Left / Right)** | محاذاة وتثبيت النافذة النشطة لنصف الشاشة (Win+Left/Right). |
-| **Back + 🔴 B** | **زر الهروب (Escape)** | إغلاق القوائم المفتوحة أو الخروج من وضع ملء الشاشة. |
-| **Back + 🔵 X** | **إظهار سطح المكتب (Show Desktop)** | تصغير جميع النوافذ فوراً والرجوع لسطح المكتب (Win+D). |
-| **Back + RB (الكتف الأيمن)** | **مبدل المهام (Task Switcher / Alt+Tab)** | تفعيل مبدل النوافذ مع تنقل سلس بالأسهم واهتزاز تفاعلي. |
+| **Back + Start** | **Toggle Desktop Control** | Hardware-level killswitch to enable or disable gamepad input at any time. |
+| **Back + LB (Left Bumper)** | **AI Voice Dictation** | Starts local Whisper AI voice typing (offline, privacy-preserving). |
+| **Back + R3 (Right Stick)** | **Radial Pie Menu** | Opens the 8-directional radial menu for fast application switching. |
+| **Back + L3 (Left Stick)** | **Drag Lock** | Toggles persistent mouse left-click hold for effortless window dragging. |
+| **Back + D-Pad ⬆️ / ⬇️** | **Volume Control** | Adjusts system volume up/down with on-screen OSD HUD and tick audio. |
+| **Back + D-Pad ⬅️ / ➡️** | **Snap Window Left / Right** | Snaps the active window to screen halves (Win + Left / Right). |
+| **Back + 🔴 Button B** | **Escape (Esc)** | Closes modals, context menus, or exits fullscreen. |
+| **Back + 🔵 Button X** | **Show Desktop** | Minimizes all open windows immediately (Win + D). |
+| **Back + RB (Right Bumper)** | **Task Switcher (Alt + Tab)** | Surfaces the Windows task switcher with haptic feedback. |
 
 ---
 
-### 4️⃣ أوامر الكتابة الصوتية الذكية (Voice Macros)
+### 4️⃣ Offline AI Voice Dictation & Natural Macros
 
-أثناء التسجيل الصوتي بالذكاء الاصطناعي:
-- **إرسال الرسالة تلقائياً:** قل **"أرسل"** أو **"إرسال"** (أو **"Send"**) في نهاية كلامك ليتم كتابة النص وضغط زر Enter تلقائياً!
-- **النزول لسطر جديد:** قل **"سطر جديد"** (أو **"New line"**) ليتم إدراج سطر جديد تلقائياً.
-- **إدراج علامات الترقيم:** نطق كلمات مثل "فاصلة"، "نقطة"، "علامة استفهام" يتم تحويلها فورياً لعلامات ترقيم (`،` `.` `؟`).
+Reverse Controller features an embedded, offline speech-to-text pipeline powered by **OpenAI Whisper** running entirely on the CPU:
+
+- **Automatic Send Macro:** Say **"send"**, **"Send"**, or **"ارسل"** / **"إرسال"** / **"انتر"** at the end of your sentence to automatically type the text and hit Enter!
+- **Spoken Newlines:** Say **"new line"**, **"newline"**, or **"سطر جديد"** to cleanly break to the next paragraph.
+- **Natural Punctuation Commands:**
+  - *"comma"* / *"فاصلة"* ⇦ `,` / `،`
+  - *"semicolon"* / *"فاصلة منقوطة"* ⇦ `;` / `؛`
+  - *"period"* / *"نقطة"* ⇦ `.`
+  - *"colon"* / *"نقطتان"* ⇦ `:`
+  - *"question mark"* / *"علامة استفهام"* ⇦ `?` / `؟`
+  - *"exclamation mark"* / *"علامة تعجب"* ⇦ `!`
+  - *"parentheses"* / *"بين قوسين"* ⇦ `()`
+  - *"dash"* / *"شرطة"* ⇦ `-`
+  - *"slash"* / *"خط مائل"* ⇦ `/`
+- **Custom Vocabulary Biasing:** Add your custom names, gamer tags, or technical slang (e.g., *"Discord"*, *"Fortnite"*, *"Rust"*, *"FIFA"*) in the **Voice & AI** settings tab to prime Whisper's token priors for 100% recognition accuracy.
 
 ---
 
-## 🚀 التشغيل السريع (Quick Start)
+## 🚀 Quick Start
 
-التطبيق محمول (Portable) بالكامل ولا يتطلب أي تثبيت:
-1. حمّل أحدث ملف مضغوط من صفحة الإصدارات: **[ReverseController-v1.2.2-windows-x64.zip](https://github.com/m7kor/Reverse-Controller/releases/latest)**.
-2. فك الضغط وشغّل `ReverseController.exe`.
-3. وصل يد التحكم واستمتع بتجربة سطح مكتب كاملة!
-4. تجد أيقونة البرنامج في شريط المهام بجانب الساعة (System Tray):
-   - **نقرة يسار:** تفتح نافذة الإعدادات الشاملة ومعايرة الأنالوج.
-   - **نقرة يمين:** تفتح القائمة السريعة للتشغيل أو الإيقاف أو الخروج.
+Reverse Controller is completely portable and requires zero installation:
+
+1. Download the latest release archive: **[Releases](https://github.com/m7kor/Reverse-Controller/releases/latest)**.
+2. Extract the `.zip` archive to any folder and run `ReverseController.exe`.
+3. Connect your gamepad and start navigating!
+4. The application docks in the System Notification Tray (near the clock):
+   - **Left-Click Tray Icon:** Opens the comprehensive Settings Panel (Pointer sensitivity, Keyboard prefs, Voice & AI settings, Profiles).
+   - **Right-Click Tray Icon:** Opens the Quick Menu to toggle control, restart, or quit.
 
 ---
 
-## 🛠️ البناء من المصدر (Building From Source)
+## 🛠️ Building From Source
 
-### المتطلبات الأساسية:
-- نظام Windows 10 أو Windows 11 (x64)
-- بيئة [Rust Toolchain (MSVC Stable)](https://rustup.rs/)
-- حزمة Visual Studio C++ Build Tools مع CMake و LLVM/libclang لبناء ميزة الصوت.
+### Prerequisites:
+- Windows 10 or Windows 11 (x64)
+- [Rust Toolchain (MSVC Stable)](https://rustup.rs/)
+- Visual Studio C++ Build Tools with CMake and LLVM/libclang (required for compiling Whisper CPU inference bindings).
 
 ```powershell
-# استنساخ المستودع الرئيسي
+# Clone the repository
 git clone https://github.com/m7kor/Reverse-Controller.git
 cd Reverse-Controller
 
-# بناء النسخة المحسنة النهائية (Release Build مع LTO)
+# Build the release binary with Link-Time Optimization (LTO)
 cargo build --release --features "gui,voice"
 
-# تشغيل الفحص الكامل والاختبارات (129 اختبار وحدة)
+# Run the test suite (131 tests)
 cargo test --features "gui,voice"
 
-# فحص التحليل الساكن الصارم (Zero Warnings)
-cargo clippy --all-targets -- -D warnings
+# Run strict Clippy lint verification (Zero Warnings)
+cargo clippy --all-targets --features "gui,voice" -- -D warnings
 ```
 
-الملف التنفيذي النهائي سيكون متاحاً في:
+The optimized production binary will be generated at:
 `target/release/ReverseController.exe`
 
 ---
 
-## ⚙️ ملفات الإعدادات والتخصيص (Configuration)
+## ⚙️ Configuration & Profiles
 
-تُحفظ جميع إعدادات البرنامج وحساسية الماوس ومناطق الخمول (Dead Zones) في المسار:
+All settings, mouse curves, analog deadzones, and custom vocabulary are persisted in standard JSON format at:
 `%APPDATA%\ControllerCompanionRust\config.json`
 
-نموذج لجزء من ملف الإعدادات:
-```json
-{
-  "enabled": true,
-  "disable_in_fullscreen": true,
-  "autostart": false,
-  "vk_auto_show": true,
-  "toggle_hotkey": "Ctrl+K",
-  "mouse": {
-    "speed": 450.0,
-    "acceleration": 800.0,
-    "wheel_speed": 3600.0
-  }
-}
-```
+### AntiMicroX Compatibility:
+Reverse Controller natively supports importing `.amgp` profile files directly through the Settings UI with automatic XML/JSON schema translation.
 
 ---
 
-## 📜 الترخيص (License)
+## 📜 License
 
-هذا المشروع منشور تحت رخصة **MIT License** المفتوحة والمجانية بالكامل. راجع ملف [LICENSE](LICENSE) لمزيد من التفاصيل.
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for complete details.

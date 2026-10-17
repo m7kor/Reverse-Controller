@@ -2148,10 +2148,15 @@ impl eframe::App for VKbdApp {
                     let p = ui.painter();
                     p.rect_filled(banner, 6.0, egui::Color32::from_rgb(0, 120, 215));
                     p.rect_stroke(banner, 6.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                    let banner_text = if self.lang == Lang::Ar {
+                        crate::arabic::reshape_ar("✥ وضع تحريك الكيبورد: حرك بالقير الأيمن • اضغط R3 للتثبيت")
+                    } else {
+                        "✥ Reposition Mode: Move with Right Stick • Press R3 to Lock".to_string()
+                    };
                     p.text(
                         banner.center(),
                         egui::Align2::CENTER_CENTER,
-                        crate::arabic::reshape_ar("✥ وضع تحريك الكيبورد: حرك بالقير الأيمن • اضغط R3 للتثبيت"),
+                        banner_text,
                         egui::FontId::proportional(11.5),
                         egui::Color32::WHITE,
                     );

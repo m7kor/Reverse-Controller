@@ -198,6 +198,48 @@ pub struct KeyboardPrefs {
     pub mechanical_sfx: bool,
 }
 
+/// Persisted voice typing and Whisper AI preferences.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VoiceSettings {
+    /// Preferred model filename: "ggml-tiny.bin", "ggml-base.bin", etc.
+    #[serde(default = "d_voice_model")]
+    pub model: String,
+    /// Language code: "ar" for Arabic, "en" for English, or "auto"
+    #[serde(default = "d_voice_lang")]
+    pub language: String,
+    /// VAD silence auto-stop pause duration in milliseconds (default 1200ms)
+    #[serde(default = "d_voice_vad_ms")]
+    pub vad_silence_ms: u64,
+    /// Natural voice macros ("ارسل" -> send Enter, "سطر جديد" -> newline, etc.)
+    #[serde(default = "d_true")]
+    pub enable_macros: bool,
+    /// Custom words, player tags, slang, and terms biased in Whisper prompt
+    #[serde(default)]
+    pub custom_vocabulary: Vec<String>,
+}
+
+fn d_voice_model() -> String {
+    "ggml-tiny.bin".to_string()
+}
+fn d_voice_lang() -> String {
+    "ar".to_string()
+}
+fn d_voice_vad_ms() -> u64 {
+    1200
+}
+
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        Self {
+            model: d_voice_model(),
+            language: d_voice_lang(),
+            vad_silence_ms: d_voice_vad_ms(),
+            enable_macros: true,
+            custom_vocabulary: Vec::new(),
+        }
+    }
+}
+
 fn d_pos_bottom() -> KeyboardPosition {
     KeyboardPosition::Bottom
 }
@@ -395,6 +437,9 @@ pub struct Config {
     pub mouse: MouseSettings,
     #[serde(default)]
     pub controller: ControllerSettings,
+    /// Local Whisper AI voice dictation and speech-to-text preferences.
+    #[serde(default)]
+    pub voice: VoiceSettings,
     /// The binding table. Missing => built-in default profile.
     #[serde(default = "default_profile")]
     pub bindings: Vec<PadBindingDef>,
@@ -417,6 +462,7 @@ impl Default for Config {
             keyboard: KeyboardPrefs::default(),
             mouse: MouseSettings::default(),
             controller: ControllerSettings::default(),
+            voice: VoiceSettings::default(),
             bindings: default_profile(),
         }
     }
@@ -494,6 +540,9 @@ impl Config {
         }
         if self.controller.left_stick_dead_zone > 32767 || self.controller.right_stick_dead_zone > 32767 {
             return Err("controller dead zones must be between 0 and 32767".into());
+        }
+        if self.voice.vad_silence_ms < 200 || self.voice.vad_silence_ms > 10000 {
+            return Err("voice.vad_silence_ms must be between 200 and 10000 milliseconds".into());
         }
         Ok(())
     }
@@ -781,5 +830,27 @@ mod tests {
         assert_eq!(x, 0, "overflowing width should pin to the left edge");
         // Height still fits, so bottom anchoring keeps its 12px margin.
         assert_eq!(y, 600 - h as i32 - 12);
+    }
+
+    #[test]
+    fn voice_settings_roundtrip_and_validation() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.voice.vad_silence_ms, 1200);
+        assert_eq!(cfg.voice.language, "ar");
+        assert!(cfg.voice.enable_macros);
+        assert!(cfg.voice.custom_vocabulary.is_empty());
+
+        cfg.voice.custom_vocabulary.push("فيفا".into());
+        cfg.voice.custom_vocabulary.push("فورتنايت".into());
+        let s = serde_json::to_string(&cfg).expect("serialize");
+        let back: Config = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back.voice.custom_vocabulary.len(), 2);
+        assert_eq!(back.voice.custom_vocabulary[0], "فيفا");
+
+        // Invalid vad_silence_ms rejected
+        cfg.voice.vad_silence_ms = 50;
+        assert!(cfg.validate().is_err());
+        cfg.voice.vad_silence_ms = 1200;
+        assert!(cfg.validate().is_ok());
     }
 }

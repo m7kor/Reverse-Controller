@@ -51,6 +51,19 @@ static HAD_SPEECH: AtomicBool = AtomicBool::new(false);
 static LAST_SPEECH_INSTANT: Mutex<Option<Instant>> = Mutex::new(None);
 static RECORD_START_INSTANT: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Global cached voice settings synchronized from active Config.
+static VOICE_SETTINGS: Mutex<Option<crate::config::VoiceSettings>> = Mutex::new(None);
+
+pub fn set_voice_settings(settings: crate::config::VoiceSettings) {
+    if let Ok(mut lock) = VOICE_SETTINGS.lock() {
+        *lock = Some(settings);
+    }
+}
+
+pub fn get_voice_settings() -> crate::config::VoiceSettings {
+    VOICE_SETTINGS.lock().ok().and_then(|l| l.clone()).unwrap_or_default()
+}
+
 pub fn is_recording() -> bool {
     IS_RECORDING.load(Ordering::SeqCst)
 }
@@ -96,15 +109,20 @@ pub fn model_path() -> Option<PathBuf> {
 
     search_dirs.push(PathBuf::from("models"));
 
-    let candidates = [
-        "ggml-base.bin",
-        "ggml-tiny.bin",
-        "ggml-small.bin",
-        "ggml-medium.bin",
-    ];
+    let settings = get_voice_settings();
+    let mut candidates = Vec::new();
+    let pref = settings.model.trim();
+    if !pref.is_empty() {
+        candidates.push(pref.to_string());
+    }
+    for &default_name in &["ggml-base.bin", "ggml-tiny.bin", "ggml-small.bin", "ggml-medium.bin"] {
+        if !candidates.iter().any(|c| c == default_name) {
+            candidates.push(default_name.to_string());
+        }
+    }
 
     for dir in &search_dirs {
-        for &name in &candidates {
+        for name in &candidates {
             let p = dir.join(name);
             if p.exists() {
                 return Some(p);
@@ -269,9 +287,16 @@ pub struct ProcessedVoice {
 pub fn process_voice_macros(raw: &str) -> ProcessedVoice {
     let mut text = raw.trim().to_string();
     let mut auto_send = false;
+    let settings = get_voice_settings();
+    if !settings.enable_macros {
+        return ProcessedVoice { text, auto_send };
+    }
 
     // Detect spoken send trigger at the end of the sentence
-    let send_keywords = ["ارسل", "إرسال", "أرسل", "send", "Send"];
+    let send_keywords = [
+        "ارسل", "إرسال", "أرسل", "انتر", "إدخال", "ادخال",
+        "send", "Send", "enter", "Enter",
+    ];
     for kw in send_keywords {
         if text.ends_with(kw) {
             let cut = text.len() - kw.len();
@@ -300,13 +325,27 @@ pub fn process_voice_macros(raw: &str) -> ProcessedVoice {
         .replace("New line", "\n")
         .replace("newline", "\n");
 
-    // Replace spoken punctuation if explicitly spoken
+    // Replace spoken punctuation and formatting if explicitly spoken
     text = text
+        .replace(" فاصلة منقوطة", "؛")
+        .replace("فاصلة منقوطة", "؛")
         .replace(" فاصلة", "،")
         .replace("فاصلة", "،")
+        .replace(" نقطتان", ":")
+        .replace("نقطتان", ":")
+        .replace(" نقطتين", ":")
+        .replace("نقطتين", ":")
         .replace(" نقطة", ".")
         .replace(" علامة استفهام", "؟")
-        .replace(" علامة تعجب", "!");
+        .replace("علامة استفهام", "؟")
+        .replace(" علامة تعجب", "!")
+        .replace("علامة تعجب", "!")
+        .replace(" بين قوسين", " ()")
+        .replace("بين قوسين", "()")
+        .replace(" شرطة", " -")
+        .replace("شرطة ", "- ")
+        .replace(" خط مائل", " /")
+        .replace(" مسافة", " ");
 
     ProcessedVoice { text, auto_send }
 }
@@ -510,12 +549,16 @@ pub fn start_recording(lang_ar: bool) -> Result<(), String> {
             let now = Instant::now();
             let had_speech = HAD_SPEECH.load(Ordering::SeqCst);
 
-            // 1. Auto-stop when silence exceeds 1200ms after speech detected (allows natural speaking pause)
+            // 1. Auto-stop when silence exceeds configured vad_silence_ms after speech detected
             if had_speech {
+                let silence_limit = Duration::from_millis(get_voice_settings().vad_silence_ms.clamp(400, 5000));
                 let last = LAST_SPEECH_INSTANT.lock().ok().and_then(|t| *t);
                 if let Some(last_time) = last {
-                    if now.saturating_duration_since(last_time) >= Duration::from_millis(1200) {
-                        crate::platform::log_debug("[voice] VAD: 1200ms silence after speech -> auto-stopping & sending text");
+                    if now.saturating_duration_since(last_time) >= silence_limit {
+                        crate::platform::log_debug(&format!(
+                            "[voice] VAD: {}ms silence after speech -> auto-stopping & sending text",
+                            silence_limit.as_millis()
+                        ));
                         stop_session(lang_ar, Some(session));
                         break;
                     }
@@ -734,7 +777,13 @@ fn process_and_transcribe(
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     // Force specific language code: "ar" or "en". Never pass "auto" on tiny models for short dictation!
-    let target_lang = if lang_ar { "ar" } else { "en" };
+    let settings = get_voice_settings();
+    let effective_ar = match settings.language.as_str() {
+        "ar" => true,
+        "en" => false,
+        _ => lang_ar,
+    };
+    let target_lang = if effective_ar { "ar" } else { "en" };
     params.set_language(Some(target_lang));
     params.set_translate(false);
     params.set_no_context(true);
@@ -747,11 +796,16 @@ fn process_and_transcribe(
     params.set_temperature(0.0);
 
     // Initial prompt primes Whisper's token priors for the exact language domain and vocabulary
-    if lang_ar {
-        params.set_initial_prompt("مرحبا، السلام عليكم، أكتب نصاً باللغة العربية بوضوح ودقة.");
+    let mut initial_prompt = if effective_ar {
+        "مرحبا، السلام عليكم، أكتب نصاً باللغة العربية بوضوح ودقة.".to_string()
     } else {
-        params.set_initial_prompt("Hello, typing clear and accurate English text.");
+        "Hello, typing clear and accurate English text.".to_string()
+    };
+    if !settings.custom_vocabulary.is_empty() {
+        initial_prompt.push(' ');
+        initial_prompt.push_str(&settings.custom_vocabulary.join(", "));
     }
+    params.set_initial_prompt(&initial_prompt);
 
     let n_threads = std::thread::available_parallelism()
         .map(|n| (n.get() as i32).clamp(1, 8))
@@ -818,9 +872,25 @@ mod tests {
 
     #[test]
     fn test_voice_macros_newline_and_punctuation() {
-        let res = process_voice_macros("مرحبا سطر جديد كيف الحال فاصلة تمام");
+        let res = process_voice_macros("مرحبا سطر جديد كيف الحال فاصلة تمام علامة استفهام ممتاز علامة تعجب");
         assert!(!res.auto_send);
-        assert_eq!(res.text, "مرحبا\nكيف الحال، تمام");
+        assert_eq!(res.text, "مرحبا\nكيف الحال، تمام؟ ممتاز!");
+
+        let res2 = process_voice_macros("النتيجة نقطتان خمسة بين قوسين");
+        assert_eq!(res2.text, "النتيجة: خمسة ()");
+
+        // When macros are disabled
+        let mut settings = get_voice_settings();
+        settings.enable_macros = false;
+        set_voice_settings(settings);
+        let res_off = process_voice_macros("مرحبا ارسل");
+        assert!(!res_off.auto_send);
+        assert_eq!(res_off.text, "مرحبا ارسل");
+
+        // Restore
+        let mut settings_restore = get_voice_settings();
+        settings_restore.enable_macros = true;
+        set_voice_settings(settings_restore);
     }
 
     #[test]

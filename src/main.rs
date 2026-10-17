@@ -338,6 +338,8 @@ fn main() {
         config.controller.right_stick_dead_zone,
         config.enabled
     );
+    #[cfg(feature = "voice")]
+    crate::voice::set_voice_settings(config.voice.clone());
 
     if elevated && config.autostart {
         if let Ok(exe) = std::env::current_exe() {
@@ -620,6 +622,8 @@ fn main() {
                         match e.reload_from_disk(&watch_path) {
                             Ok(()) => {
                                 last_mod = Some(m);
+                                #[cfg(feature = "voice")]
+                                crate::voice::set_voice_settings(e.config().voice.clone());
                                 println!("[main] reloaded updated config from {}", watch_path.display());
                             }
                             Err(error) => eprintln!("[main] config reload deferred: {error}"),

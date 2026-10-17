@@ -244,13 +244,14 @@ fn action_picker(ui: &mut egui::Ui, id: impl std::hash::Hash, current: &mut Acti
 
 static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum SettingsPage {
     Overview,
     Pointer,
     Keyboard,
     Profiles,
     Bindings,
+    Voice,
 }
 
 struct SettingsApp {
@@ -274,6 +275,7 @@ struct SettingsApp {
     runtime_status: Option<crate::runtime_status::RuntimeStatus>,
     last_status_check: Instant,
     last_status_seen: Instant,
+    custom_vocab_input: String,
 }
 
 impl SettingsApp {
@@ -289,6 +291,7 @@ impl SettingsApp {
         } else {
             working.active_profile.clone()
         };
+        let custom_vocab_input = working.voice.custom_vocabulary.join(", ");
         SettingsApp {
             engine,
             config_path,
@@ -307,6 +310,7 @@ impl SettingsApp {
             runtime_status: None,
             last_status_check: Instant::now() - Duration::from_secs(1),
             last_status_seen: Instant::now() - Duration::from_secs(10),
+            custom_vocab_input,
         }
     }
 
@@ -410,6 +414,8 @@ impl SettingsApp {
                     self.working.active_profile.clone()
                 };
                 self.status = format!("Saved to {}", self.config_path.display());
+                #[cfg(feature = "voice")]
+                crate::voice::set_voice_settings(self.working.voice.clone());
                 true
             }
             Err(e) => {
@@ -616,6 +622,7 @@ impl eframe::App for SettingsApp {
                             } else {
                                 self.working.active_profile.clone()
                             };
+                            self.custom_vocab_input = self.working.voice.custom_vocabulary.join(", ");
                             if let Ok(mut engine) = self.engine.lock() {
                                 engine.apply_config(self.working.clone());
                             }
@@ -627,6 +634,7 @@ impl eframe::App for SettingsApp {
                 if ui.button("Reset to defaults").clicked() {
                     self.working = Config::default();
                     self.active_profile = crate::profiles::DEFAULT_NAME.to_string();
+                    self.custom_vocab_input = self.working.voice.custom_vocabulary.join(", ");
                     self.status = "Defaults are ready. Save to apply them.".into();
                 }
                 if ui.button("Close").clicked() {
@@ -648,6 +656,7 @@ impl eframe::App for SettingsApp {
                     (SettingsPage::Keyboard, "Keyboard"),
                     (SettingsPage::Profiles, "Profiles"),
                     (SettingsPage::Bindings, "Bindings"),
+                    (SettingsPage::Voice, "Voice & AI (الصوت)"),
                 ] {
                     ui.selectable_value(&mut self.page, page, title);
                 }
@@ -1232,6 +1241,141 @@ impl eframe::App for SettingsApp {
                 });
 
                 }
+
+                if self.page == SettingsPage::Voice {
+                    ui.label(egui::RichText::new(ar("الكتابة الصوتية والذكاء الاصطناعي (Offline Voice AI)")).strong());
+                    ui.label("Speech-to-Text powered locally by OpenAI Whisper. 100% private, runs entirely on CPU without internet.");
+                    ui.add_space(8.0);
+
+                    // 1. Microphone status & Live VU meter
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new(ar("1. حالة الميكروفون ومستوى الصوت الحية")).strong());
+                        #[cfg(feature = "voice")]
+                        {
+                            let level = crate::voice::audio_level();
+                            let is_rec = crate::voice::is_recording();
+                            let is_trans = crate::voice::is_transcribing();
+                            let status_str = if is_trans {
+                                "⚡ Transcribing with Whisper CPU..."
+                            } else if is_rec {
+                                "🔴 Recording in progress..."
+                            } else {
+                                "Ready / Microphone Standby"
+                            };
+                            ui.label(format!("State: {status_str}"));
+                            ui.horizontal(|ui| {
+                                ui.label("Input Level:");
+                                let bar = egui::ProgressBar::new(level)
+                                    .text(format!("{:.0}%", level * 100.0))
+                                    .animate(is_rec);
+                                ui.add(bar);
+                            });
+                            if is_rec || is_trans {
+                                ui.ctx().request_repaint_after(Duration::from_millis(30));
+                            }
+                        }
+                        #[cfg(not(feature = "voice"))]
+                        {
+                            ui.label("Voice feature is not enabled in this build.");
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 2. Whisper Model Status
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new(ar("2. نموذج الذكاء الاصطناعي (Whisper Model)")).strong());
+                        #[cfg(feature = "voice")]
+                        {
+                            let model_found = crate::voice::model_path();
+                            match model_found {
+                                Some(p) => {
+                                    ui.colored_label(egui::Color32::from_rgb(91, 217, 167), format!("✔ Model loaded from: {}", p.display()));
+                                    if let Ok(meta) = std::fs::metadata(&p) {
+                                        let mb = meta.len() as f64 / (1024.0 * 1024.0);
+                                        ui.label(format!("File size: {:.1} MB", mb));
+                                    }
+                                }
+                                None => {
+                                    ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠ No Whisper model found!");
+                                    ui.label("Place ggml-tiny.bin (75MB) or ggml-base.bin (140MB) in:");
+                                    ui.monospace("%APPDATA%\\ControllerCompanionRust\\models");
+                                }
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Model file name:");
+                            ui.text_edit_singleline(&mut self.working.voice.model);
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 3. Language & VAD settings
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new(ar("3. اللغة واكتشاف السكون (Language & VAD)")).strong());
+                        ui.horizontal(|ui| {
+                            ui.label("Recognition Language:");
+                            egui::ComboBox::from_id_source("voice_lang_picker")
+                                .selected_text(match self.working.voice.language.as_str() {
+                                    "ar" => "العربية (Arabic)",
+                                    "en" => "English",
+                                    _ => "Auto (Match Keyboard)",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.working.voice.language, "ar".into(), "العربية (Arabic)");
+                                    ui.selectable_value(&mut self.working.voice.language, "en".into(), "English");
+                                    ui.selectable_value(&mut self.working.voice.language, "auto".into(), "Auto (Match Keyboard)");
+                                });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("VAD Silence Pause (ms):");
+                            ui.add(egui::Slider::new(&mut self.working.voice.vad_silence_ms, 500..=3000).text("Pause duration before auto-stop"));
+                        });
+
+                        ui.checkbox(
+                            &mut self.working.voice.enable_macros,
+                            ar("تفعيل ماكرو الأوامر الصوتية (نطق 'أرسل' يضغط Enter، 'سطر جديد'، علامات الترقيم)"),
+                        );
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 4. Custom Vocabulary Biasing
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new(ar("4. قاموس الكلمات والمصطلحات المخصصة (Vocabulary Bias)")).strong());
+                        ui.label("Type custom terms, gamer tags, or technical names separated by commas. Whisper will prioritize recognizing them:");
+                        let resp = ui.text_edit_singleline(&mut self.custom_vocab_input);
+                        if resp.changed() {
+                            self.working.voice.custom_vocabulary = self.custom_vocab_input
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        }
+                        if !self.working.voice.custom_vocabulary.is_empty() {
+                            ui.label(format!("Active biased terms ({}): {}", self.working.voice.custom_vocabulary.len(), self.working.voice.custom_vocabulary.join(" · ")));
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 5. Test dictation button
+                    ui.horizontal(|ui| {
+                        #[cfg(feature = "voice")]
+                        {
+                            let is_rec = crate::voice::is_recording();
+                            let btn_label = if is_rec { "⏹ Stop Recording & Transcribe" } else { "🎙 Start Voice Test (تحدث الآن)" };
+                            if ui.button(btn_label).clicked() {
+                                crate::voice::toggle_voice_typing(self.working.voice.language == "ar");
+                            }
+                            if let Some(last) = crate::voice::last_transcribed() {
+                                ui.label(format!("Last result: \"{last}\""));
+                            }
+                        }
+                    });
+                }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if self.page == SettingsPage::Profiles && ui.button("Import .amgp profile...").clicked() {
@@ -1333,5 +1477,26 @@ mod tests {
         let current = json!({"enabled": false, "active_profile": "Browser", "mouse": {"speed": 600, "acceleration": 400}});
         let merged = merge_edits(&original, &edited, &current);
         assert_eq!(merged, json!({"enabled": false, "active_profile": "Browser", "mouse": {"speed": 750, "acceleration": 400}}));
+    }
+
+    #[test]
+    fn test_gui_voice_tab_settings_state() {
+        let xinput = crate::win32::XInputApi::load().expect("xinput available");
+        let engine = std::sync::Arc::new(std::sync::Mutex::new(crate::engine::Engine::new(
+            xinput,
+            crate::config::Config::default(),
+        )));
+        let mut app = super::SettingsApp::new(engine, std::path::PathBuf::from("test.json"));
+        assert_eq!(app.page, super::SettingsPage::Overview);
+        app.page = super::SettingsPage::Voice;
+        assert_eq!(app.page, super::SettingsPage::Voice);
+        app.custom_vocab_input = "فيفا, فورتنايت, ديسكورد".into();
+        app.working.voice.custom_vocabulary = app.custom_vocab_input
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(app.working.voice.custom_vocabulary.len(), 3);
+        assert_eq!(app.working.voice.custom_vocabulary[1], "فورتنايت");
     }
 }
