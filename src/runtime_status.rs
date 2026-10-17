@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::os::windows::ffi::OsStrExt;
 use std::time::{Duration, SystemTime};
 
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 const MAX_AGE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -44,7 +45,7 @@ impl RuntimeMode {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeStatus {
     pub mode: RuntimeMode,
     pub enabled: bool,
@@ -52,6 +53,25 @@ pub struct RuntimeStatus {
     pub controller_index: u32,
     pub active_profile: String,
     pub battery_level: Option<u8>,
+    /// The controller is on a cable, so its battery level means nothing.
+    #[serde(default)]
+    pub battery_wired: bool,
+    /// Which controller is in use ("Xbox controller (XInput)",
+    /// "PlayStation 5 (DualSense)", …); empty when none.
+    #[serde(default)]
+    pub controller_name: String,
+}
+
+/// Rewrite the snapshot at most this often while nothing changes. Readers
+/// treat anything older than `MAX_AGE` as "background app not running".
+const HEARTBEAT: Duration = Duration::from_millis(1500);
+
+/// Publish when the state changed or the heartbeat is due.
+pub fn should_publish(last: Option<&(RuntimeStatus, std::time::Instant)>, current: &RuntimeStatus) -> bool {
+    match last {
+        None => true,
+        Some((previous, at)) => previous != current || at.elapsed() >= HEARTBEAT,
+    }
 }
 
 pub fn path_for_config(config_path: &Path) -> PathBuf {
@@ -74,9 +94,10 @@ pub fn publish(path: &Path, status: &RuntimeStatus) -> std::io::Result<()> {
     extern "system" {
         fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
     }
+    // No write-through: this snapshot is disposable and rewritten constantly,
+    // so forcing it to the disk would only wear the drive.
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
     if result == 0 {
         // Some managed workspaces deny replace-by-rename even though writing
         // the existing file is allowed. Readers reject an incomplete JSON
@@ -89,6 +110,7 @@ pub fn publish(path: &Path, status: &RuntimeStatus) -> std::io::Result<()> {
     }
 }
 
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub fn read_recent(path: &Path) -> Option<RuntimeStatus> {
     let metadata = std::fs::metadata(path).ok()?;
     if SystemTime::now().duration_since(metadata.modified().ok()?).ok()? > MAX_AGE {
@@ -110,6 +132,28 @@ mod tests {
     }
 
     #[test]
+    fn publishes_on_change_and_on_heartbeat_only() {
+        let status = RuntimeStatus {
+            mode: RuntimeMode::Active,
+            enabled: true,
+            connected: true,
+            controller_index: 0,
+            active_profile: "Default".into(),
+            battery_level: Some(3),
+            battery_wired: false,
+            controller_name: String::new(),
+        };
+        assert!(should_publish(None, &status));
+        let fresh = (status.clone(), std::time::Instant::now());
+        assert!(!should_publish(Some(&fresh), &status), "unchanged state is not rewritten");
+        let changed = RuntimeStatus { enabled: false, ..status.clone() };
+        assert!(should_publish(Some(&fresh), &changed));
+        let old = (status.clone(), std::time::Instant::now() - HEARTBEAT);
+        assert!(should_publish(Some(&old), &status), "heartbeat keeps the file fresh");
+        assert!(HEARTBEAT * 2 <= MAX_AGE, "readers must see at least one heartbeat per window");
+    }
+
+    #[test]
     fn snapshot_can_be_replaced_and_read() {
         let path = std::env::temp_dir().join(format!(
             "cc-runtime-status-{}-{}.json",
@@ -123,6 +167,8 @@ mod tests {
             controller_index: 0,
             active_profile: "Default".into(),
             battery_level: Some(3),
+            battery_wired: false,
+            controller_name: String::new(),
         };
         publish(&path, &status).unwrap();
         assert_eq!(read_recent(&path).unwrap().mode, RuntimeMode::Active);

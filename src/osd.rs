@@ -232,7 +232,8 @@ pub fn spawn() {
         .spawn(move || {
             run_osd_thread();
         })
-        .expect("failed to spawn cc-osd-hud thread");
+        .map(|_| ())
+        .unwrap_or_else(|e| crate::platform::log_debug(&format!("[osd] could not start: {e}")));
 }
 
 /// Display a volume notification with an active percentage meter.
@@ -369,12 +370,19 @@ pub fn query_master_volume() -> Option<(u32, bool)> {
 
 /// Convenience function: query real volume and show it on OSD.
 pub fn trigger_volume_feedback() {
-    if let Some((vol, mute)) = query_master_volume() {
-        show_volume(vol, mute);
-    } else {
-        // Fallback display
-        show_info("🔊", "Volume Changed", "Master Audio");
+    if !is_osd_enabled() {
+        return;
     }
+    // Called as the volume key goes down: give Windows a moment to apply the
+    // change, otherwise the meter shows the level from before the press.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(90));
+        if let Some((vol, mute)) = query_master_volume() {
+            show_volume(vol, mute);
+        } else {
+            show_info("🔊", "Volume Changed", "Master Audio");
+        }
+    });
 }
 
 /// Display controller battery status.
@@ -489,7 +497,7 @@ unsafe extern "system" fn osd_wnd_proc(
         WM_OSD_UPDATE => {
             if let Ok(mut pending) = PENDING_PAYLOAD.lock() {
                 if let Some(p) = pending.take() {
-                    let mut lock = LIVE_STATE.lock().unwrap();
+                    let mut lock = LIVE_STATE.lock().unwrap_or_else(|e| e.into_inner());
                     let state = lock.get_or_insert_with(|| OsdState {
                         payload: p.clone(),
                         phase: OsdPhase::Hidden,
@@ -501,7 +509,7 @@ unsafe extern "system" fn osd_wnd_proc(
                     state.sustain_until = Instant::now() + Duration::from_millis(1800);
 
                     // Position at top-center of work area
-                    let (wx, wy, ww, _wh) = crate::platform::work_area();
+                    let (wx, wy, ww, _wh) = crate::platform::work_area_active();
                     let x = wx + (ww - OSD_WIDTH) / 2;
                     let y = wy + 38;
 
@@ -624,7 +632,7 @@ unsafe fn paint_osd(hwnd: HWND, hdc: HDC) {
 
     SetBkMode(mem_dc, TRANSPARENT_BK);
 
-    let lock = LIVE_STATE.lock().unwrap();
+    let lock = LIVE_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(state) = lock.as_ref() {
         let font_icon = CreateFontW(
             28, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0,

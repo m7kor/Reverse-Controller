@@ -54,27 +54,72 @@ pub fn request_vkeyboard_repaint() {
     }
 }
 
+/// The latest keyboard preferences, for code outside the overlay thread.
+static CURRENT_PREFS: Mutex<Option<crate::config::KeyboardPrefs>> = Mutex::new(None);
+/// Where the user last dragged or moved the keyboard, saved on exit.
+static LAST_POSITION: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+
+fn current_prefs() -> crate::config::KeyboardPrefs {
+    CURRENT_PREFS.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
+}
+
+/// The position the user last moved the keyboard to in this session.
+pub fn last_position() -> Option<(i32, i32)> {
+    LAST_POSITION.lock().ok().and_then(|g| *g)
+}
+
+fn note_last_position(pos: (i32, i32)) {
+    if let Ok(mut g) = LAST_POSITION.lock() {
+        *g = Some(pos);
+    }
+}
+
+/// Where the keyboard opens: the remembered spot (kept on its own monitor) or
+/// the configured edge of the monitor the user is working on.
+pub fn opening_origin(prefs: &crate::config::KeyboardPrefs, remembered: Option<(i32, i32)>) -> (i32, i32) {
+    match remembered.filter(|_| prefs.remember_position) {
+        Some((x, y)) => {
+            let (w, h) = prefs.window_size();
+            let area = platform::work_area_at(x + w as i32 / 2, y + h as i32 / 2);
+            crate::config::KeyboardPrefs { position: crate::config::KeyboardPosition::Custom, ..prefs.clone() }
+                .anchor(area, Some((x, y)))
+        }
+        None => prefs.anchor(platform::work_area_active(), None),
+    }
+}
+
+/// Show the on-screen keyboard at its preferred size and place.
+pub fn show_keyboard(flag: &Arc<AtomicBool>) {
+    OVERLAY_MODE.store(0, Ordering::SeqCst);
+    platform::push_foreground();
+    flag.store(true, Ordering::SeqCst);
+    let prefs = current_prefs();
+    let remembered = last_position().or(prefs.last_position);
+    let (x, y) = opening_origin(&prefs, remembered);
+    let (w, h) = prefs.window_size();
+    platform::place_window(WINDOW_TITLE, x, y, w.round() as i32, h.round() as i32);
+    platform::set_window_visible(WINDOW_TITLE, true);
+    request_vkeyboard_repaint();
+}
+
+/// Hide the overlay (keyboard or radial menu).
+pub fn hide_keyboard(flag: &Arc<AtomicBool>) {
+    flag.store(false, Ordering::SeqCst);
+    platform::set_window_visible(WINDOW_TITLE, false);
+    platform::move_window(WINDOW_TITLE, -4000, -4000);
+    request_vkeyboard_repaint();
+}
+
 /// Toggle the on-screen virtual keyboard.
 pub fn toggle_keyboard(flag: Option<Arc<AtomicBool>>) {
     if let Some(f) = flag {
         let cur_vis = f.load(Ordering::SeqCst);
         let cur_mode = OVERLAY_MODE.load(Ordering::SeqCst);
         if cur_vis && cur_mode == 0 {
-            f.store(false, Ordering::SeqCst);
-            platform::set_window_visible(WINDOW_TITLE, false);
-            platform::move_window(WINDOW_TITLE, -4000, -4000);
+            hide_keyboard(&f);
         } else {
-            OVERLAY_MODE.store(0, Ordering::SeqCst);
-            platform::push_foreground();
-            f.store(true, Ordering::SeqCst);
-            let work = platform::work_area();
-            let origin = crate::config::KeyboardPrefs::default().anchor(work, None);
-            let base_w = (crate::config::KB_BASE_W).round() as i32;
-            let base_h = (crate::config::KB_BASE_H).round() as i32;
-            platform::place_window(WINDOW_TITLE, origin.0, origin.1, base_w, base_h);
-            platform::set_window_visible(WINDOW_TITLE, true);
+            show_keyboard(&f);
         }
-        request_vkeyboard_repaint();
     }
 }
 
@@ -84,14 +129,13 @@ pub fn toggle_radial_menu(flag: Option<Arc<AtomicBool>>) {
         let cur_vis = f.load(Ordering::SeqCst);
         let cur_mode = OVERLAY_MODE.load(Ordering::SeqCst);
         if cur_vis && cur_mode == 1 {
-            f.store(false, Ordering::SeqCst);
-            platform::set_window_visible(WINDOW_TITLE, false);
-            platform::move_window(WINDOW_TITLE, -4000, -4000);
+            hide_keyboard(&f);
+            return;
         } else {
             OVERLAY_MODE.store(1, Ordering::SeqCst);
             platform::push_foreground();
             f.store(true, Ordering::SeqCst);
-            let (wx, wy, ww, wh) = platform::work_area();
+            let (wx, wy, ww, wh) = platform::work_area_active();
             let want = (430.0f32, 430.0f32);
             let origin = (
                 (wx as f32 + (ww as f32 - want.0) / 2.0).round() as i32,
@@ -115,6 +159,9 @@ pub fn is_vk_actually_shown() -> bool {
 static LIVE_PREFS: Mutex<Option<crate::config::KeyboardPrefs>> = Mutex::new(None);
 
 pub fn update_prefs(prefs: crate::config::KeyboardPrefs) {
+    if let Ok(mut lock) = CURRENT_PREFS.lock() {
+        *lock = Some(prefs.clone());
+    }
     if let Ok(mut lock) = LIVE_PREFS.lock() {
         *lock = Some(prefs);
     }
@@ -216,6 +263,7 @@ impl VKbdApp {
         let goal_x_left = if rows.len() > 1 { key_center(&rows[1], left_cursor.1) } else { 0.0 };
         let goal_x_right = if rows.len() > 1 { key_center(&rows[1], right_cursor.1) } else { 0.0 };
         let split_mode = prefs.split_mode;
+        let window_pos = prefs.last_position.filter(|_| prefs.remember_position);
         Self {
             visible,
             nav,
@@ -248,7 +296,7 @@ impl VKbdApp {
             frame: 0,
             mode: OverlayMode::Keyboard,
             radial_selected_slice: None,
-            window_pos: None,
+            window_pos,
             typing_target: 0,
             typed_buffer: String::new(),
             typed_word: String::new(),
@@ -382,7 +430,22 @@ impl VKbdApp {
         self.release_oneshots();
     }
 
+    /// Remember the word just finished, if the user allows learning.
+    fn commit_word(&mut self) {
+        if self.prefs.learn_words && !self.typed_word.is_empty() {
+            crate::predict::learn(&self.typed_word);
+        }
+    }
+
     pub fn execute_action(&mut self, act: Act) {
+        let ends_word = match act {
+            Act::Space | Act::Enter | Act::ShiftEnter | Act::Tab => true,
+            Act::Char(c, _) => !c.is_alphabetic() && c != '\'',
+            _ => false,
+        };
+        if ends_word {
+            self.commit_word();
+        }
         if matches!(
             act,
             Act::Key(_)
@@ -398,7 +461,7 @@ impl VKbdApp {
                 | Act::ShowDesktop
                 | Act::CloseActiveWindow
         ) || ((self.ctrl || self.alt || self.altgr)
-            && matches!(act, Act::Char(..) | Act::Backspace | Act::Space | Act::Str(_)))
+            && matches!(act, Act::Char(..) | Act::CharOrStr(..) | Act::Backspace | Act::Space | Act::Str(_)))
         {
             self.typed_word.clear();
             self.typed_buffer.clear();
@@ -412,6 +475,19 @@ impl VKbdApp {
                     self.typed_buffer.push(ch);
                     self.typed_word = trailing_word(&self.typed_buffer);
                 }
+            }
+            Act::CharOrStr(c, shifted) => {
+                if self.shift.on() && !shortcut {
+                    self.key.send_str(shifted);
+                    self.release_oneshots();
+                    self.typed_buffer.push_str(shifted);
+                } else {
+                    self.type_char(c);
+                    if !shortcut {
+                        self.typed_buffer.push(c);
+                    }
+                }
+                self.typed_word = trailing_word(&self.typed_buffer);
             }
             Act::Str(s) => {
                 let mods = self.armed_mods();
@@ -593,6 +669,9 @@ impl VKbdApp {
                     return;
                 }
                 self.release_oneshots();
+                if self.prefs.learn_words {
+                    crate::predict::learn(word);
+                }
                 let count = self.typed_word.chars().count();
                 for _ in 0..count {
                     self.tap_key(NavKey::Backspace);
@@ -628,6 +707,7 @@ impl VKbdApp {
             act,
             Act::Char(_, _)
                 | Act::Str(_)
+                | Act::CharOrStr(..)
                 | Act::Key(_)
                 | Act::WinKey
                 | Act::Backspace
@@ -765,7 +845,9 @@ impl VKbdApp {
         if nav.select > 0 {
             if let Some(s) = self.radial_selected_slice {
                 self.trigger_radial_action(s);
-                return true;
+                // Slice 0 switches the overlay to the keyboard; every other
+                // slice is a one-shot action that closes the menu.
+                return s != 0;
             }
         }
         if nav.close > 0 || nav.hide > 0 {
@@ -845,26 +927,9 @@ impl VKbdApp {
         }
 
         if self.repositioning {
+            // The window itself is moved once per frame in `update`.
             self.reposition_rx = n.right_stick_x;
             self.reposition_ry = n.right_stick_y;
-            let deadzone = 5000.0;
-            if self.reposition_rx.abs() > deadzone || self.reposition_ry.abs() > deadzone {
-                let speed = 0.00045;
-                let (wx, wy, ww, wh) = platform::work_area();
-                let (base_x, base_y) = self
-                    .window_pos
-                    .unwrap_or_else(|| self.prefs.anchor((wx, wy, ww, wh), None));
-                let dx = ((self.reposition_rx / 32767.0) * ww as f32 * speed).round() as i32;
-                let dy = ((-self.reposition_ry / 32767.0) * wh as f32 * speed).round() as i32;
-                let max_x = (wx + ww) - (BASE_W * self.prefs.scale).round() as i32;
-                let max_y = (wy + wh) - (BASE_H * self.prefs.scale).round() as i32;
-                let nx = (base_x + dx).clamp(wx, max_x.max(wx));
-                let ny = (base_y + dy).clamp(wy, max_y.max(wy));
-                if (nx, ny) != (base_x, base_y) {
-                    self.window_pos = Some((nx, ny));
-                    platform::move_window(WINDOW_TITLE, nx, ny);
-                }
-            }
             if n.select > 0 || n.close > 0 || n.hide > 0 {
                 self.repositioning = false;
                 if let Ok(mut g) = self.nav.lock() {
@@ -944,14 +1009,16 @@ impl VKbdApp {
                 self.left_cursor = (lr, lc);
                 self.right_cursor = (rr, rc);
 
-                if n.select_left > 0 && self.grid_nav_active {
+                let select_left = n.select_left > 0 || (n.select > 0 && self.last_cursor_moved == 0);
+                let select_right = n.select_right > 0 || (n.select > 0 && self.last_cursor_moved == 1);
+                if select_left {
                     if let Some(kd) = self.rows.get(lr).and_then(|row| row.get(lc)) {
                         let a = kd.act;
                         self.flash = Some(((lr, lc), Instant::now()));
                         self.perform_in_context(a);
                     }
                 }
-                if n.select_right > 0 && self.grid_nav_active {
+                if select_right {
                     if let Some(kd) = self.rows.get(rr).and_then(|row| row.get(rc)) {
                         let a = kd.act;
                         self.flash = Some(((rr, rc), Instant::now()));
@@ -1002,9 +1069,6 @@ impl VKbdApp {
         }
         if n.lang > 0 {
             self.perform_in_context(Act::Lang);
-            self.window_pos = None;
-            let (wx, wy, ww, wh) = platform::work_area();
-            self.window_pos = Some(self.prefs.anchor((wx, wy, ww, wh), None));
             crate::sound::play_sfx(crate::sound::SoundEffect::RadialSnap);
             crate::engine::trigger_haptic(10000, 14000, 0.04);
         }
@@ -1051,6 +1115,12 @@ impl VKbdApp {
 }
 
 impl eframe::App for VKbdApp {
+    /// Fully transparent, so only the painted panel or circle is visible
+    /// (eframe's default is a translucent dark grey that fills the window).
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_typing_target(platform::foreground_hwnd());
         let pointer_delta = ctx.input(|i| i.pointer.delta().length());
@@ -1107,7 +1177,11 @@ impl eframe::App for VKbdApp {
         }
 
         let vis = self.visible.load(Ordering::SeqCst);
-        let _ = platform::enforce_overlay_style(WINDOW_TITLE);
+        let _ = platform::enforce_overlay_style(WINDOW_TITLE, self.mode == OverlayMode::Keyboard);
+        if let Ok(mut g) = self.nav.lock() {
+            g.radial_active = vis && self.mode == OverlayMode::RadialMenu;
+            g.split_mode = vis && self.mode == OverlayMode::Keyboard && self.split_mode;
+        }
 
         if !vis {
             if self.shown || !self.initial_hidden {
@@ -1128,7 +1202,15 @@ impl eframe::App for VKbdApp {
             return;
         }
 
-        let (wx, wy, ww, wh) = platform::work_area();
+        // A placed keyboard stays on its own monitor; otherwise it follows the
+        // monitor of the window being typed into.
+        let (wx, wy, ww, wh) = match self.window_pos {
+            Some((x, y)) => {
+                let (w, h) = self.prefs.window_size();
+                platform::work_area_at(x + w as i32 / 2, y + h as i32 / 2)
+            }
+            None => platform::work_area_active(),
+        };
         let (sw, sh) = (ww as f32, wh as f32);
         if (sw, sh) != self.screen {
             self.screen = (sw, sh);
@@ -1182,6 +1264,11 @@ impl eframe::App for VKbdApp {
 
             if let Some(slice) = radial_choice {
                 self.trigger_radial_action(slice);
+                if slice != 0 {
+                    // One-shot actions and the centre "cancel" close the menu.
+                    self.visible.store(false, Ordering::SeqCst);
+                    ctx.request_repaint();
+                }
             }
             ctx.request_repaint_after(Duration::from_millis(30));
             return;
@@ -1256,6 +1343,7 @@ impl eframe::App for VKbdApp {
                 if self.window_pos != Some((nx, ny)) {
                     self.window_pos = Some((nx, ny));
                     self.prefs.remember_position = true;
+                    note_last_position((nx, ny));
                     platform::place_window(WINDOW_TITLE, nx, ny, want.0.round() as i32, want.1.round() as i32);
                     ctx.request_repaint();
                 }
@@ -1280,6 +1368,8 @@ impl eframe::App for VKbdApp {
         if !self.shown && want.0 > 0.0 && platform::set_window_visible(WINDOW_TITLE, true) {
             self.shown = true;
             VKBD_SHOWN.store(true, Ordering::SeqCst);
+            // Each time the keyboard appears, optionally start on the cheat sheet.
+            self.hints = self.prefs.show_hints_on_open;
         }
 
         let now = Instant::now();
@@ -1490,10 +1580,11 @@ impl eframe::App for VKbdApp {
             if drag.dragged() {
                 if let (Some(a), Some(p)) = (self.drag_anchor, ptr) {
                     let cur = (win_origin.0 + p.x * ppp, win_origin.1 + p.y * ppp);
-                    let nx = (a.origin.0 + cur.0 - a.cursor.0).clamp(0.0, max_x).round() as i32;
-                    let ny = (a.origin.1 + cur.1 - a.cursor.1).clamp(0.0, max_y).round() as i32;
+                    let nx = (a.origin.0 + cur.0 - a.cursor.0).clamp(wx as f32, max_x).round() as i32;
+                    let ny = (a.origin.1 + cur.1 - a.cursor.1).clamp(wy as f32, max_y).round() as i32;
                     if self.window_pos != Some((nx, ny)) {
                         self.window_pos = Some((nx, ny));
+                        note_last_position((nx, ny));
                         platform::move_window(WINDOW_TITLE, nx, ny);
                     }
                 }
@@ -1517,6 +1608,9 @@ pub fn spawn(
 ) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(start_visible));
     let arabic = prefs.start_arabic;
+    if let Ok(mut g) = CURRENT_PREFS.lock() {
+        *g = Some(prefs.clone());
+    }
     crate::platform::log_debug(&format!(
         "[vkeyboard] spawn() called: start_visible={start_visible} demo={demo}"
     ));
@@ -1803,6 +1897,46 @@ mod tests {
     }
 
     #[test]
+    fn arabic_shift_lam_alef_sends_real_letters_not_presentation_forms() {
+        let rows = layout::ar_abc();
+        for (base, want) in [('\u{0641}', "\u{0644}\u{0625}"), ('\u{0644}', "\u{0644}\u{0623}")] {
+            let k = rows.iter().flatten().find(|k| matches!(k.act, Act::CharOrStr(c, _) if c == base)).unwrap();
+            assert_eq!(k.act, Act::CharOrStr(base, want));
+            assert_eq!(k.shifted, Some(want));
+        }
+        for k in rows.iter().flatten() {
+            for s in [k.label].into_iter().chain(k.shifted) {
+                assert!(!s.chars().any(|c| ('\u{FB50}'..='\u{FEFF}').contains(&c)), "presentation form in {s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn toolbar_offers_only_the_editing_shortcuts() {
+        let app = VKbdApp::new(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(VkNav::default())),
+            Lang::En,
+            true,
+            crate::config::KeyboardPrefs::default(),
+        );
+        assert_eq!(
+            app.get_toolbar_actions(),
+            vec![Act::Copy, Act::Paste, Act::ShiftEnter]
+        );
+    }
+
+    #[test]
+    fn edit_tools_are_reachable_from_every_letter_layout() {
+        for lang in [Lang::En, Lang::Ar] {
+            for layer in [Layer::Abc, Layer::Num] {
+                let rows = build_layout(lang, layer);
+                assert!(rows.iter().flatten().any(|k| k.act == Act::EditTools), "{lang:?}/{layer:?} has no Edit key");
+            }
+        }
+    }
+
+    #[test]
     fn arabic_ligature_is_a_string_action() {
         let rows = layout::ar_abc();
         assert!(
@@ -1816,7 +1950,7 @@ mod tests {
         let rows = layout::ar_abc();
         let mut seen = HashSet::new();
         for k in rows.iter().flatten() {
-            if let Act::Char(c, _) = k.act {
+            if let Act::Char(c, _) | Act::CharOrStr(c, _) = k.act {
                 assert!(seen.insert(c), "duplicate key for {c:?} in the Arabic layout");
             }
         }

@@ -85,6 +85,7 @@ pub fn load(path: &Path) -> Result<Profile, String> {
     serde_json::from_str(raw.strip_prefix('\u{feff}').unwrap_or(&raw)).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub fn save(dir: &Path, stem: &str, profile: &Profile) -> Result<PathBuf, String> {
     if stem.is_empty() || stem.starts_with('.') || stem.ends_with(['.', ' ']) || stem.chars().any(|c| c.is_control() || "<>:\"/\\|?*".contains(c)) {
         return Err("Profile name must be a plain filename without reserved characters".into());
@@ -131,6 +132,7 @@ fn load_name(path: &Path) -> Option<String> {
 
 /// Make `stem` unique inside `dir` by appending " 2", " 3", ... if needed.
 /// Protects against clobbering an existing profile when importing.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub fn unique_stem(dir: &Path, stem: &str) -> String {
     let taken = |s: &str| {
         ["json", "amgp"]

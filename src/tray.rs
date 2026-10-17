@@ -66,6 +66,7 @@ const IDM_RELOAD: u16 = 1003;
 const IDM_QUIT: u16 = 1004;
 const IDM_VKEYBOARD: u16 = 1005;
 const IDM_ELEVATE: u16 = 1006;
+const IDM_DOCTOR: u16 = 1007;
 
 #[repr(C)]
 struct GUID {
@@ -167,6 +168,230 @@ extern "system" {
     fn Shell_NotifyIconW(msg: u32, data: *mut NOTIFYICONDATAW) -> i32;
 }
 
+// ---------------------------------------------------------------------------
+// Status icon: a small gamepad drawn in code, coloured by the engine state.
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+struct BITMAPINFOHEADER {
+    biSize: u32,
+    biWidth: i32,
+    biHeight: i32,
+    biPlanes: u16,
+    biBitCount: u16,
+    biCompression: u32,
+    biSizeImage: u32,
+    biXPelsPerMeter: i32,
+    biYPelsPerMeter: i32,
+    biClrUsed: u32,
+    biClrImportant: u32,
+}
+
+#[repr(C)]
+struct ICONINFO {
+    fIcon: i32,
+    xHotspot: u32,
+    yHotspot: u32,
+    hbmMask: *mut c_void,
+    hbmColor: *mut c_void,
+}
+
+#[link(name = "gdi32")]
+extern "system" {
+    fn CreateDIBSection(
+        hdc: *mut c_void,
+        info: *const BITMAPINFOHEADER,
+        usage: u32,
+        bits: *mut *mut c_void,
+        section: *mut c_void,
+        offset: u32,
+    ) -> *mut c_void;
+    fn CreateBitmap(w: i32, h: i32, planes: u32, bpp: u32, bits: *const c_void) -> *mut c_void;
+    fn DeleteObject(obj: *mut c_void) -> i32;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn CreateIconIndirect(info: *const ICONINFO) -> HICON;
+}
+
+const ICON_SIZE: usize = 32;
+
+/// Coverage (0..=1) of the gamepad silhouette at a point, in a 32×32 grid.
+fn gamepad_coverage(x: f32, y: f32) -> bool {
+    let rounded_rect = |x0: f32, y0: f32, x1: f32, y1: f32, r: f32| {
+        let cx = x.clamp(x0 + r, x1 - r);
+        let cy = y.clamp(y0 + r, y1 - r);
+        (x - cx).powi(2) + (y - cy).powi(2) <= r * r
+    };
+    let circle = |cx: f32, cy: f32, r: f32| (x - cx).powi(2) + (y - cy).powi(2) <= r * r;
+    let body = rounded_rect(3.0, 9.0, 29.0, 21.0, 5.5) || circle(8.5, 21.0, 5.0) || circle(23.5, 21.0, 5.0);
+    // D-pad and two face buttons are cut out so the shape reads as a pad.
+    let dpad = (x - 9.5).abs() <= 1.0 && (y - 15.5).abs() <= 3.5 || (y - 15.5).abs() <= 1.0 && (x - 9.5).abs() <= 3.5;
+    let buttons = circle(21.0, 14.0, 1.7) || circle(24.5, 17.0, 1.7);
+    body && !dpad && !buttons
+}
+
+/// Premultiplied BGRA pixels (top row first) for a gamepad in `rgb`, with an
+/// optional status dot in the top-right corner.
+fn icon_pixels(rgb: (u8, u8, u8), dot: Option<(u8, u8, u8)>) -> Vec<u32> {
+    const SS: usize = 4; // 4×4 supersampling for smooth edges
+    let mut px = vec![0u32; ICON_SIZE * ICON_SIZE];
+    for row in 0..ICON_SIZE {
+        for col in 0..ICON_SIZE {
+            let mut hits = 0usize;
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let x = col as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let y = row as f32 + (sy as f32 + 0.5) / SS as f32;
+                    hits += gamepad_coverage(x, y) as usize;
+                }
+            }
+            let mut a = (hits * 255 / (SS * SS)) as u32;
+            let (mut r, mut g, mut b) = (rgb.0 as u32, rgb.1 as u32, rgb.2 as u32);
+            if let Some(d) = dot {
+                let (dx, dy) = (col as f32 + 0.5 - 26.0, row as f32 + 0.5 - 6.0);
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist <= 5.5 {
+                    // A dark ring keeps the dot readable on light taskbars.
+                    let (cr, cg, cb) = if dist <= 4.0 { (d.0, d.1, d.2) } else { (20, 20, 24) };
+                    r = cr as u32;
+                    g = cg as u32;
+                    b = cb as u32;
+                    a = 255;
+                }
+            }
+            px[row * ICON_SIZE + col] = (a << 24) | ((r * a / 255) << 16) | ((g * a / 255) << 8) | (b * a / 255);
+        }
+    }
+    px
+}
+
+fn create_icon(pixels: &[u32]) -> HICON {
+    unsafe {
+        let header = BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: ICON_SIZE as i32,
+            biHeight: -(ICON_SIZE as i32), // top-down rows
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            biSizeImage: 0,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let color = CreateDIBSection(std::ptr::null_mut(), &header, 0, &mut bits, std::ptr::null_mut(), 0);
+        if color.is_null() || bits.is_null() {
+            return LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+        }
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, pixels.len());
+        let mask = CreateBitmap(ICON_SIZE as i32, ICON_SIZE as i32, 1, 1, std::ptr::null());
+        let info = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let icon = CreateIconIndirect(&info);
+        DeleteObject(color);
+        DeleteObject(mask);
+        if icon.is_null() {
+            LoadIconW(std::ptr::null_mut(), IDI_APPLICATION)
+        } else {
+            icon
+        }
+    }
+}
+
+/// The tray icon for a runtime mode (`None` = not known yet). Icons are made
+/// once and reused for the life of the process.
+fn status_icon(mode: Option<crate::runtime_status::RuntimeMode>) -> HICON {
+    use crate::runtime_status::RuntimeMode as M;
+    static ICONS: [AtomicPtr<c_void>; 5] = [
+        AtomicPtr::new(std::ptr::null_mut()),
+        AtomicPtr::new(std::ptr::null_mut()),
+        AtomicPtr::new(std::ptr::null_mut()),
+        AtomicPtr::new(std::ptr::null_mut()),
+        AtomicPtr::new(std::ptr::null_mut()),
+    ];
+    let (slot, body, dot) = match mode {
+        Some(M::Active) => (0, (255, 170, 0), Some((46, 204, 113))),
+        Some(M::PausedFullscreen) => (1, (255, 170, 0), Some((52, 152, 219))),
+        Some(M::Disabled) => (2, (150, 155, 165), Some((231, 76, 60))),
+        Some(M::Disconnected) => (3, (150, 155, 165), None),
+        None => (4, (255, 170, 0), None),
+    };
+    let cached = ICONS[slot].load(Ordering::Relaxed);
+    if !cached.is_null() {
+        return cached;
+    }
+    let icon = create_icon(&icon_pixels(body, dot));
+    ICONS[slot].store(icon, Ordering::Relaxed);
+    icon
+}
+
+/// Tooltip text for the tray icon (Windows shows at most 127 characters).
+fn status_tip(status: &crate::runtime_status::RuntimeStatus) -> String {
+    let mut tip = format!("Reverse Controller — {}", status.mode.label());
+    if status.connected && !status.controller_name.is_empty() {
+        tip.push_str(&format!("\n{}", status.controller_name));
+    }
+    if status.connected {
+        tip.push_str(&format!("\nProfile: {}", status.active_profile));
+        if status.battery_wired {
+            tip.push_str(" · Wired");
+        } else if let Some(level) = status.battery_level {
+            let battery = match level {
+                0 => "Empty",
+                1 => "Low",
+                2 => "Medium",
+                _ => "Full",
+            };
+            tip.push_str(&format!(" · Battery: {battery}"));
+        }
+    }
+    tip.chars().take(127).collect()
+}
+
+/// Last tooltip shown, so the icon is only touched when something changes.
+static LAST_TIP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Show the engine's state on the tray icon. Cheap to call often: it only
+/// talks to the shell when the tooltip or icon would change.
+pub fn refresh_status(status: &crate::runtime_status::RuntimeStatus) {
+    let hwnd = TRAY_HWND.load(Ordering::Relaxed);
+    if hwnd.is_null() {
+        return;
+    }
+    let tip = status_tip(status);
+    let key = format!("{:?}|{tip}", status.mode);
+    if let Ok(mut last) = LAST_TIP.lock() {
+        if last.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        *last = Some(key);
+    }
+    unsafe {
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.hIcon = status_icon(Some(status.mode));
+        let wide = to_wide(&tip);
+        let n = wide.len().min(127);
+        nid.szTip[..n].copy_from_slice(&wide[..n]);
+        nid.szTip[n] = 0;
+        nid.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        Shell_NotifyIconW(NIM_MODIFY, &mut nid);
+    }
+}
+
+/// Forget the shown state so the next refresh repaints the icon (used after
+/// Explorer restarts).
+fn invalidate_status() {
+    if let Ok(mut last) = LAST_TIP.lock() {
+        *last = None;
+    }
+}
+
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
@@ -198,15 +423,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         nid.uID = 1;
         nid.uFlags = NIF_MESSAGE | NIF_ICON;
         nid.uCallbackMessage = CBTRAY;
-        nid.hIcon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+        nid.hIcon = status_icon(None);
         Shell_NotifyIconW(NIM_ADD, &mut nid);
         nid.uTimeoutOrVersion = NOTIFYICON_VERSION_4;
-        let tip = if crate::platform::is_elevated() {
-            "Controller Companion (Administrator)"
-        } else {
-            "Controller Companion (مفعّل - ENABLED)"
-        };
-        set_tip(hwnd, &mut nid, tip);
+        set_tip(hwnd, &mut nid, "Reverse Controller");
+        invalidate_status();
         return 0;
     }
 
@@ -256,20 +477,9 @@ unsafe fn set_tip(hwnd: HWND, nid: *mut NOTIFYICONDATAW, text: &str) {
     let _ = hwnd;
 }
 
-pub fn update_tip_status(enabled: bool) {
-    let hwnd = TRAY_HWND.load(Ordering::Relaxed);
-    if !hwnd.is_null() {
-        let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        let tip = if enabled {
-            "Controller Companion (مفعّل - ENABLED)"
-        } else {
-            "Controller Companion (معطّل - DISABLED)"
-        };
-        unsafe { set_tip(hwnd, &mut nid, tip) };
-    }
+/// Ask for the icon to be repainted on the next status refresh.
+pub fn update_tip_status(_enabled: bool) {
+    invalidate_status();
 }
 
 fn show_menu(hwnd: HWND) {
@@ -300,6 +510,8 @@ fn show_menu(hwnd: HWND) {
             let vk_txt = to_wide(if vk_state { "Hide Keyboard (إخفاء الكيبورد)" } else { "Show Keyboard (إظهار الكيبورد)" });
             AppendMenuW(menu, MF_STRING, IDM_VKEYBOARD as usize, vk_txt.as_ptr());
         }
+        let doctor_txt = to_wide("Diagnostics Report (تقرير التشخيص)");
+        AppendMenuW(menu, MF_STRING, IDM_DOCTOR as usize, doctor_txt.as_ptr());
         if !crate::platform::is_elevated() {
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
             let elevate_txt = to_wide("Restart as Administrator (تشغيل كمسؤول)");
@@ -355,29 +567,10 @@ fn handle_cmd(id: u16) {
         }
         #[cfg(feature = "gui")]
         IDM_VKEYBOARD => {
-            with_ctx(|ctx| {
-                if let Some(f) = &ctx.vk {
-                    let next = !f.load(Ordering::SeqCst);
-                    f.store(next, Ordering::SeqCst);
-                    if next {
-                        crate::platform::push_foreground();
-                        let prefs = ctx.engine.lock().map(|e| e.config().keyboard.clone()).unwrap_or_default();
-                        let work = crate::platform::work_area();
-                        let origin = prefs.anchor(work, None);
-                        let base_w = (crate::config::KB_BASE_W * prefs.scale).round() as i32;
-                        let base_h = (crate::config::KB_BASE_H * prefs.scale).round() as i32;
-                        crate::platform::place_window("CCVKbd", origin.0, origin.1, base_w, base_h);
-                        crate::platform::set_window_visible("CCVKbd", true);
-                        crate::vkeyboard::request_vkeyboard_repaint();
-                        crate::platform::log_debug("[tray] Show Keyboard clicked -> placed and shown");
-                    } else {
-                        crate::platform::move_window("CCVKbd", -4000, -4000);
-                        crate::vkeyboard::request_vkeyboard_repaint();
-                        crate::platform::trim_working_set();
-                        crate::platform::log_debug("[tray] Hide Keyboard clicked -> parked offscreen");
-                    }
-                }
-            });
+            with_ctx(|ctx| crate::vkeyboard::toggle_keyboard(ctx.vk.clone()));
+        }
+        IDM_DOCTOR => {
+            with_ctx(|ctx| crate::doctor::open_report(&ctx.config_path));
         }
         IDM_ELEVATE => {
             if let Ok(()) = crate::platform::relaunch_elevated(&[]) {
@@ -480,18 +673,14 @@ pub fn run(
         nid.uID = 1;
         nid.uFlags = NIF_MESSAGE | NIF_ICON;
         nid.uCallbackMessage = CBTRAY;
-        nid.hIcon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+        nid.hIcon = status_icon(None);
         if Shell_NotifyIconW(NIM_ADD, &mut nid) == 0 {
             let err = GetLastError();
             eprintln!("[tray] Shell_NotifyIcon ADD failed (code: {err}) - running in non-desktop or background mode");
         }
         nid.uTimeoutOrVersion = NOTIFYICON_VERSION_4;
-        let tip = if crate::platform::is_elevated() {
-            "Controller Companion (Administrator)"
-        } else {
-            "Controller Companion (مفعّل - ENABLED)"
-        };
-        set_tip(hwnd, &mut nid, tip);
+        set_tip(hwnd, &mut nid, "Reverse Controller");
+        invalidate_status();
 
         // Message loop.
         let mut msg: MSG = std::mem::zeroed();
@@ -507,3 +696,41 @@ pub fn run(
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime_status::{RuntimeMode, RuntimeStatus};
+
+    #[test]
+    fn icon_has_a_soft_gamepad_shape_with_transparent_corners() {
+        let px = icon_pixels((255, 170, 0), None);
+        assert_eq!(px.len(), ICON_SIZE * ICON_SIZE);
+        let alpha = |x: usize, y: usize| px[y * ICON_SIZE + x] >> 24;
+        assert_eq!(alpha(0, 0), 0, "corners stay transparent");
+        assert_eq!(alpha(16, 12), 255, "centre of the body is solid");
+        assert_eq!(alpha(9, 15), 0, "the d-pad is cut out");
+        assert!((0..ICON_SIZE * ICON_SIZE).any(|i| (1..255).contains(&(px[i] >> 24))), "edges are anti-aliased");
+        let dotted = icon_pixels((255, 170, 0), Some((46, 204, 113)));
+        assert_eq!(dotted[6 * ICON_SIZE + 26] & 0x00FF_FFFF, (46 << 16) | (204 << 8) | 113);
+    }
+
+    #[test]
+    fn tooltip_names_state_profile_and_battery_within_the_shell_limit() {
+        let status = RuntimeStatus {
+            mode: RuntimeMode::Active,
+            enabled: true,
+            connected: true,
+            controller_index: 0,
+            active_profile: "Browser".into(),
+            battery_level: Some(1),
+            battery_wired: false,
+            controller_name: "PlayStation 5 (DualSense)".into(),
+        };
+        let tip = status_tip(&status);
+        assert!(tip.contains("active") && tip.contains("Browser") && tip.contains("Low"), "{tip}");
+        assert!(tip.contains("DualSense"), "{tip}");
+        let long = RuntimeStatus { active_profile: "x".repeat(400), ..status };
+        assert!(status_tip(&long).chars().count() <= 127);
+    }
+}

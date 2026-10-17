@@ -42,7 +42,7 @@ static WAV_RADIAL_SNAP: OnceLock<Vec<u8>> = OnceLock::new();
 /// Uses pre-cached static WAV buffers to ensure memory remains valid for PlaySoundW
 /// and avoids spawning OS threads on every keystroke.
 pub fn play_sfx(effect: SoundEffect) {
-    if effect == SoundEffect::KeyClick && !is_sfx_enabled() {
+    if !is_sfx_enabled() {
         return;
     }
 

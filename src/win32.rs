@@ -251,6 +251,11 @@ pub fn send_inputs(inputs: &[INPUT]) -> u32 {
     if inputs.is_empty() {
         return 0;
     }
+    // Unit tests exercise the whole input pipeline; they must never type or
+    // click into whatever window happens to be focused while they run.
+    if cfg!(test) {
+        return inputs.len() as u32;
+    }
     unsafe {
         let mut sent = SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32);
         if sent == 0 {

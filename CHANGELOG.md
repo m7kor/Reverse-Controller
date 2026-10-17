@@ -6,6 +6,69 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v1.3.0] — 2026-10-18
+
+### 🚀 Highlights
+- **Installer built in**: running the downloaded `.exe` offers a per-user install (no administrator rights) to `%LOCALAPPDATA%\Programs\Reverse Controller`, with a Start-menu shortcut and an entry in Windows Installed apps; a newer download updates it; `--uninstall` removes it and keeps settings. Declining is remembered (portable use). The executable now carries an app icon and version information.
+- **Getting started tutorial**: opens on first launch; six steps (move, click, scroll, aim, type, quick menu) tick off as they are done on the controller.
+- **Smart pointer**: the pointer eases off over links and buttons (detected from the hand cursor, without accessibility queries that would slow browsers) so small targets are easy to stop on; a full push still sweeps past. Adjustable on the Pointer page.
+- **Button-mapping wizard**: teaches the app any non-Xbox controller's layout, button by button, saved per controller model.
+- **Every kind of controller**: besides Xbox/XInput pads, PlayStation 5 (DualSense, DualSense Edge), PlayStation 4 (DualShock 4), Nintendo Switch Pro and generic USB/Bluetooth gamepads now work without extra drivers, through the Windows joystick API. Buttons map by position, PlayStation triggers stay analog, the PS/Home button acts as Guide. Settings, the tray tooltip and the diagnostics report name the controller in use. XInput pads are preferred, and a third-party Xbox-mode pad is never read twice.
+- **Redesigned Settings window**: sidebar navigation, card layout, toggle switches and a dark theme that matches the keyboard. Eight pages (Home, Pointer, Controller, Keyboard, Buttons, Profiles, General, About), fully in **English and Arabic** with right-to-left layout and an Auto / English / العربية language choice. Unsaved-changes indicator, Ctrl+S, and a prompt before closing with unsaved edits.
+- **Shortcut library**: 86 actions in seven groups for any button — browser tabs, copy/paste/save/find, snip, emoji panel, clipboard history, Run, Search, File Explorer, lock, Task Manager, magnifier, display modes and more. New actions: double click, cursor to next monitor, centre cursor on window, next/previous profile.
+- **Buttons page**: stick roles with a one-click left-handed swap, add or remove second-layer (Back) shortcuts, conflict warnings, restore defaults.
+- **Fullscreen exceptions**: browsers and video players keep desktop control in fullscreen; the list is editable.
+- **Word learning**: words typed twice become keyboard suggestions, stored locally; can be turned off or cleared.
+- **Keyboard toolbar**: shortcut buttons shrink to icons while word suggestions are shown.
+- **Live tray icon**: a gamepad drawn in code, coloured by state, with mode, profile and battery in the tooltip; Diagnostics Report in the menu.
+- **Diagnostics report** (`--doctor`, tray, Settings): settings, conflicts, profiles, XInput, controllers, elevation, monitors and fullscreen state, saved to `diagnostics.txt`.
+- **Low-battery warning** once per connection for wireless pads.
+- **Multi-monitor keyboard**: opens on the monitor you are working on and keeps a moved keyboard on its own monitor.
+
+### 🐛 Fixes
+- Quitting while an app-specific profile was active saved its bindings over your own; exit now writes back only on/off, a profile you chose from the controller, and the keyboard position.
+- Auto-switching returned to *Default* instead of your chosen profile, switched when focusing the app's own windows, and stopped re-applying after a settings reload.
+- `ActivateProfile`, `NextVirtualDesktop`, `PrevVirtualDesktop` and voice typing actions did nothing.
+- While a fullscreen game was focused the engine zeroed every controller motor 125 times a second, cancelling the game's own rumble; idle states now release input once and leave the motors alone.
+- Each haptic pulse spawned a thread that could cut newer pulses short; one watchdog now serves all pulses.
+- Split keyboard mode could not type: the triggers now type the left/right key, both sticks move the cursors, and neither moves the pointer.
+- The editing panel had no entry key (the bottom row had two Ctrl keys); the right Ctrl is now ✂ Edit.
+- Arabic Shift+T / Shift+G sent presentation-form glyphs instead of لإ / لأ.
+- The keyboard ignored size and edge preferences when opened from L3, the tray or a text click, never saved a moved position, moved twice per frame in R3 mode, and jumped back when switching language.
+- Radial menu: the left stick also moved the pointer, clicking a slice left the menu open, the centre did not cancel, and choosing *Keyboard* with the controller closed the overlay.
+- A changed toggle shortcut took effect only after a restart.
+- The runtime status file was rewritten with write-through twice a second; it is now written on change plus a light heartbeat.
+- Turning off *Start with Windows* left the elevated logon task in place; elevation relaunch broke paths containing spaces.
+- Volume notifications showed the level from before the key press; menu sounds ignored the sound setting; `debug.log` grew without limit (now rotated at 1 MB).
+- Analog triggers bound to Ctrl/Shift could chatter at the threshold (hysteresis added).
+- Registry calls declared a 64-bit return value for a 32-bit `LONG`, so a success could be misread as an error.
+- A hand-edited `{"WindowDrag": null}` binding failed to load.
+- Third-party pads reporting an unknown battery showed "Empty" and could trigger a false low-battery warning.
+- *Show controls when opened* was saved but never applied.
+- README described features that are not in the app (offline Whisper voice, emoji browser, a `voice` build feature) and the wrong default buttons; both READMEs were rewritten from the code.
+
+### 🛡️ Stability
+- Clicking with A no longer runs a cross-process accessibility query on the input thread; text-box detection moved to a background thread, so an unresponsive window can never freeze the controller.
+- Window dragging and showing the keyboard from other threads use asynchronous window calls, so a hung app or a busy overlay cannot stall input.
+- The status snapshot uses cached connection and battery data instead of querying the controller every 250 ms under the engine lock (removes a periodic pointer stutter).
+- Empty XInput slots are scanned at most twice a second while no controller is connected.
+- Console output can no longer crash the app when its terminal is closed (release builds abort on panic).
+- If the app ever crashes, the panic handler releases held modifiers, mouse buttons and rumble; startup also clears input left stuck by a previous crash.
+- A disconnect while holding A in keyboard pointer mode no longer leaves the left mouse button down.
+- Holding Guide to power the controller off no longer opens the Start menu.
+- A released scroll stick no longer leaves a fractional tick that fires on the next touch.
+- Startup registrations (`schtasks`) run in the background instead of delaying input.
+- Starting the app again while it runs opens (or focuses) the Settings window instead of exiting silently; startup entries pass `--autostart` so sign-in launches stay quiet.
+- A damaged `config.json` no longer stops the app from starting: the last good copy (`config.json.bak`) or the defaults are used, the damaged file is kept aside as `config.broken-<time>.json`, and a notification explains what happened.
+- An input-loop watchdog releases held keys and buttons if the loop ever stops ticking for 2 seconds, and logs the stall.
+- Unit tests no longer type or click into the focused window or write to the user's debug log.
+- Emoji and voice-typing toolbar buttons removed; the keyboard's mixed Arabic labels (✂ تحرير) render correctly; edit-panel labels use one size; the radial menu no longer shows a grey square behind the circle.
+
+### 🧪 Quality
+- 181 tests in the full build and 135 in the headless build; strict Clippy is clean for both, and `scripts/check.ps1` now checks both.
+
+---
+
 ## [v1.2.3] — 2026-10-17
 
 ### 🚀 Highlights

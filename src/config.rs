@@ -71,6 +71,17 @@ pub struct MouseSettings {
     /// Minimum mouse speed multiplier at full trigger press (0.25 = 4x finer precision).
     #[serde(default = "d_sniper_scale")]
     pub sniper_scale: f32,
+    /// Smart pointer: slow down over links and buttons so small targets are
+    /// easy to stop on. A full stick push still sweeps past at full speed.
+    #[serde(default = "d_true")]
+    pub smart_pointer: bool,
+    /// Pointer speed multiplier over a link or button (0.45 = a little under
+    /// half speed).
+    #[serde(default = "d_smart_pointer_speed")]
+    pub smart_pointer_speed: f32,
+}
+fn d_smart_pointer_speed() -> f32 {
+    0.45
 }
 fn d_sniper_scale() -> f32 {
     0.25
@@ -124,6 +135,8 @@ impl Default for MouseSettings {
             wheel_speed_y: 0.0,
             sniper_enabled: true,
             sniper_scale: d_sniper_scale(),
+            smart_pointer: true,
+            smart_pointer_speed: d_smart_pointer_speed(),
         }
     }
 }
@@ -196,6 +209,14 @@ pub struct KeyboardPrefs {
     /// Subtle tactile/mechanical audio feedback on keystrokes.
     #[serde(default = "d_true")]
     pub mechanical_sfx: bool,
+    /// Where the user last dragged or moved the keyboard (screen pixels). Used
+    /// on the next start when `remember_position` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_position: Option<(i32, i32)>,
+    /// Learn words typed on the keyboard so suggestions improve. Stored only in
+    /// the local settings folder.
+    #[serde(default = "d_true")]
+    pub learn_words: bool,
 }
 
 fn d_pos_bottom() -> KeyboardPosition {
@@ -341,6 +362,8 @@ impl Default for KeyboardPrefs {
             split_mode: false,
             smart_caret_avoidance: true,
             mechanical_sfx: true,
+            last_position: None,
+            learn_words: true,
         }
     }
 }
@@ -398,6 +421,17 @@ pub struct Config {
     /// Settings GUI language ("auto", "en", or "ar", default "auto").
     #[serde(default = "d_gui_language")]
     pub gui_language: String,
+    /// Executables that keep desktop control while fullscreen, such as
+    /// browsers and video players. Lowercase file names, e.g. `chrome.exe`.
+    #[serde(default = "d_fullscreen_exceptions")]
+    pub fullscreen_exceptions: Vec<String>,
+    /// Show a notification and a short rumble once when a wireless
+    /// controller's battery drops to Low or Empty.
+    #[serde(default = "d_true")]
+    pub low_battery_warning: bool,
+    /// Button layouts taught with the mapping wizard, per controller model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_pad_layouts: Vec<PadLayoutOverride>,
     /// The binding table. Missing => built-in default profile.
     #[serde(default = "default_profile")]
     pub bindings: Vec<PadBindingDef>,
@@ -407,6 +441,16 @@ fn d_true() -> bool {
 }
 fn d_gui_language() -> String {
     "auto".to_string()
+}
+pub fn d_fullscreen_exceptions() -> Vec<String> {
+    [
+        "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe",
+        "vlc.exe", "mpv.exe", "mpc-hc64.exe", "mpc-be64.exe", "potplayermini64.exe",
+        "wmplayer.exe", "microsoft.media.player.exe", "kodi.exe",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for Config {
@@ -424,6 +468,9 @@ impl Default for Config {
             mouse: MouseSettings::default(),
             controller: ControllerSettings::default(),
             gui_language: d_gui_language(),
+            fullscreen_exceptions: d_fullscreen_exceptions(),
+            low_battery_warning: true,
+            custom_pad_layouts: Vec::new(),
             bindings: default_profile(),
         }
     }
@@ -488,6 +535,7 @@ impl Config {
             ("modifier_zone", m.modifier_zone, 32767.0), ("max_zone", m.max_zone, 32767.0),
             ("altsnap_zone", m.altsnap_zone, 32767.0), ("diagonal_range", m.diagonal_range, 100.0),
             ("altsnap_speed", m.altsnap_speed, 1.0), ("sniper_scale", m.sniper_scale, 1.0),
+            ("smart_pointer_speed", m.smart_pointer_speed, 1.0),
         ] {
             if !value.is_finite() || !(0.0..=max).contains(&value) {
                 return Err(format!("mouse.{name} must be finite and between 0 and {max}"));
@@ -502,7 +550,131 @@ impl Config {
         if self.controller.left_stick_dead_zone > 32767 || self.controller.right_stick_dead_zone > 32767 {
             return Err("controller dead zones must be between 0 and 32767".into());
         }
+        if let Some(bad) = self.custom_pad_layouts.iter().find(|o| !o.layout.is_valid()) {
+            return Err(format!("custom_pad_layouts: the layout for {:04X}:{:04X} has a button outside 1..32", bad.vendor, bad.product));
+        }
+        for name in &self.fullscreen_exceptions {
+            let name = name.trim();
+            if name.is_empty() || name.contains(['/', '\\', ':']) {
+                return Err(format!("fullscreen_exceptions entry {name:?} must be a program file name such as chrome.exe"));
+            }
+        }
         Ok(())
+    }
+
+    /// Is `exe` (a lowercase process file name) allowed to keep desktop
+    /// control while it is fullscreen?
+    pub fn is_fullscreen_exception(&self, exe: &str) -> bool {
+        self.fullscreen_exceptions
+            .iter()
+            .any(|e| e.trim().eq_ignore_ascii_case(exe))
+    }
+}
+
+/// Bindings that share an input and layer. Only the first one in the table
+/// ever fires, so later duplicates silently do nothing.
+pub fn binding_conflicts(
+    bindings: &[PadBindingDef],
+) -> Vec<(crate::bindings::Input, Option<crate::actions::Modifier>)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut conflicts = Vec::new();
+    for b in bindings {
+        let key = (b.input, b.modifier);
+        if !seen.insert(key) && !conflicts.contains(&key) {
+            conflicts.push(key);
+        }
+    }
+    conflicts
+}
+
+/// A button layout the user taught for one controller model.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PadLayoutOverride {
+    pub vendor: u16,
+    pub product: u16,
+    /// Shown in the settings, e.g. "Gamepad (2DC8:6001)".
+    #[serde(default)]
+    pub name: String,
+    pub layout: crate::gamepads::Layout,
+}
+
+/// How the startup configuration was obtained.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoadOutcome {
+    /// config.json was valid.
+    Loaded,
+    /// No config.json yet; defaults are used.
+    Fresh,
+    /// config.json was damaged; the last good copy was used instead.
+    RestoredBackup { broken: PathBuf },
+    /// config.json was damaged and there was no usable backup.
+    ResetToDefaults { broken: PathBuf },
+}
+
+/// Path of the "last known good" copy of a settings file.
+pub fn backup_path(path: &std::path::Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".bak");
+    path.with_file_name(name)
+}
+
+/// Load the startup configuration without ever refusing to start.
+///
+/// A valid file is also copied to `config.json.bak`, the last known good
+/// version. A damaged file is moved aside (so nothing overwrites it and it can
+/// be inspected), and the backup — or failing that, the defaults — is used.
+pub fn load_resilient(path: &std::path::Path) -> (Config, LoadOutcome) {
+    if !path.exists() {
+        return (Config::default(), LoadOutcome::Fresh);
+    }
+    match Config::try_load(path) {
+        Ok(config) => {
+            let _ = std::fs::read(path).and_then(|data| crate::storage::write_atomic(&backup_path(path), &data));
+            (config, LoadOutcome::Loaded)
+        }
+        Err(_) => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let broken = path.with_extension(format!("broken-{stamp}.json"));
+            let _ = std::fs::rename(path, &broken);
+            let backup = backup_path(path);
+            match Config::try_load(&backup) {
+                Ok(config) => {
+                    let _ = config.save(path);
+                    (config, LoadOutcome::RestoredBackup { broken })
+                }
+                Err(_) => {
+                    let config = Config::default();
+                    let _ = config.save(path);
+                    (config, LoadOutcome::ResetToDefaults { broken })
+                }
+            }
+        }
+    }
+}
+
+/// State the running app may change and must write back on exit. Everything
+/// else in config.json belongs to the user and the Settings window.
+pub struct RuntimeChanges {
+    pub enabled: bool,
+    /// A profile the user switched to from the controller: stem and bindings.
+    pub profile: Option<(String, Vec<PadBindingDef>)>,
+    pub keyboard_position: Option<(i32, i32)>,
+}
+
+impl RuntimeChanges {
+    pub fn apply_to(self, mut saved: Config) -> Config {
+        saved.enabled = self.enabled;
+        if let Some((stem, bindings)) = self.profile {
+            saved.active_profile = stem;
+            saved.bindings = bindings;
+        }
+        if let Some(pos) = self.keyboard_position {
+            saved.keyboard.last_position = Some(pos);
+        }
+        saved
     }
 }
 
@@ -563,6 +735,119 @@ mod tests {
         assert!(cfg.validate().unwrap_err().contains("toggle_hotkey"));
         cfg.toggle_hotkey.clear();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn fullscreen_exceptions_default_to_browsers_and_match_case_insensitively() {
+        let cfg = Config::default();
+        assert!(cfg.is_fullscreen_exception("chrome.exe"));
+        assert!(cfg.is_fullscreen_exception("MSEDGE.EXE"));
+        assert!(!cfg.is_fullscreen_exception("eldenring.exe"));
+        let old: Config = serde_json::from_str("{}").expect("old configs still load");
+        assert!(old.is_fullscreen_exception("vlc.exe"));
+    }
+
+    #[test]
+    fn fullscreen_exceptions_reject_paths() {
+        let mut cfg = Config::default();
+        cfg.fullscreen_exceptions.push("C:\\Games\\game.exe".into());
+        assert!(cfg.validate().unwrap_err().contains("fullscreen_exceptions"));
+        cfg.fullscreen_exceptions.pop();
+        cfg.fullscreen_exceptions.push("  ".into());
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn default_profile_has_no_binding_conflicts_and_duplicates_are_reported() {
+        let mut bindings = default_profile();
+        assert!(binding_conflicts(&bindings).is_empty());
+        bindings.push(PadBindingDef { input: Input::A, modifier: None, action: Action::DoNothing });
+        bindings.push(PadBindingDef { input: Input::A, modifier: None, action: Action::DoNothing });
+        assert_eq!(binding_conflicts(&bindings), vec![(Input::A, None)]);
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cc-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn startup_survives_a_damaged_settings_file() {
+        let dir = temp_dir("resilient");
+        let path = dir.join("config.json");
+
+        // First a good file: it loads and becomes the backup.
+        let good = Config { active_profile: "Mine".into(), ..Config::default() };
+        good.save(&path).unwrap();
+        let (cfg, outcome) = load_resilient(&path);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(cfg.active_profile, "Mine");
+        assert!(backup_path(&path).exists());
+
+        // Then damage it: the backup comes back and the bad file is kept aside.
+        std::fs::write(&path, b"{\"enabled\": tru").unwrap();
+        let (cfg, outcome) = load_resilient(&path);
+        assert_eq!(cfg.active_profile, "Mine");
+        let LoadOutcome::RestoredBackup { broken } = outcome else { panic!("expected the backup") };
+        assert!(broken.exists(), "the damaged file is preserved for inspection");
+        assert!(Config::try_load(&path).is_ok(), "config.json is valid again");
+
+        // With no usable backup either, defaults are used instead of exiting.
+        std::fs::write(&path, b"not json").unwrap();
+        std::fs::write(backup_path(&path), b"not json either").unwrap();
+        let (cfg, outcome) = load_resilient(&path);
+        assert!(matches!(outcome, LoadOutcome::ResetToDefaults { .. }));
+        assert_eq!(cfg.active_profile, "");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn exit_save_keeps_saved_bindings_unless_the_user_switched_profiles() {
+        let mut saved = Config { active_profile: "Browser".into(), ..Config::default() };
+        saved.mouse.speed = 640.0;
+        let untouched = RuntimeChanges { enabled: false, profile: None, keyboard_position: None }
+            .apply_to(saved.clone());
+        assert!(!untouched.enabled);
+        assert_eq!(untouched.active_profile, "Browser");
+        assert_eq!(untouched.bindings.len(), saved.bindings.len());
+        assert_eq!(untouched.mouse.speed, 640.0);
+
+        let switched = RuntimeChanges {
+            enabled: true,
+            profile: Some(("Games".into(), Vec::new())),
+            keyboard_position: Some((40, 50)),
+        }
+        .apply_to(saved);
+        assert_eq!(switched.active_profile, "Games");
+        assert!(switched.bindings.is_empty());
+        assert_eq!(switched.keyboard.last_position, Some((40, 50)));
+    }
+
+    #[test]
+    fn learned_controller_layouts_round_trip_and_are_validated() {
+        let mut cfg = Config::default();
+        let layout = crate::gamepads::Layout::for_family(crate::gamepads::Family::SwitchPro);
+        cfg.custom_pad_layouts.push(PadLayoutOverride { vendor: 0x2DC8, product: 0x6001, name: "8BitDo".into(), layout });
+        let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.custom_pad_layouts, cfg.custom_pad_layouts);
+        cfg.custom_pad_layouts[0].layout.start = 40;
+        assert!(cfg.validate().unwrap_err().contains("custom_pad_layouts"));
+        let plain = serde_json::to_string(&Config::default()).unwrap();
+        assert!(!plain.contains("custom_pad_layouts"), "no clutter when unused");
+    }
+
+    #[test]
+    fn keyboard_position_survives_a_round_trip() {
+        let mut cfg = Config::default();
+        cfg.keyboard.last_position = Some((-1200, 640));
+        let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.keyboard.last_position, Some((-1200, 640)));
+        assert!(back.keyboard.learn_words);
     }
 
     #[test]

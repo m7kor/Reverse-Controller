@@ -74,13 +74,22 @@ pub struct VkNav {
     /// Whether D-pad arrow navigation is actively focused on the keyboard grid.
     /// When false, the yellow focus highlight is hidden and Button A clicks with the mouse pointer.
     pub grid_nav_active: bool,
+    /// Set by the keyboard while Dual-Stick Split mode is on. The engine then
+    /// drives both cursors from the sticks and selects with the triggers.
+    pub split_mode: bool,
+    /// Set by the overlay while the radial menu is shown, so the left stick
+    /// steers the menu instead of the pointer.
+    pub radial_active: bool,
 }
 
 impl VkNav {
     /// Read the pending state and reset it (single consumer).
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub fn drain(&mut self) -> VkNav {
         let is_rep = self.is_repositioning;
         let is_grid = self.grid_nav_active;
+        let split = self.split_mode;
+        let radial = self.radial_active;
         let rx = self.right_stick_x;
         let ry = self.right_stick_y;
         let sx = self.stick_x;
@@ -89,6 +98,8 @@ impl VkNav {
         *self = VkNav::default();
         self.is_repositioning = is_rep;
         self.grid_nav_active = is_grid;
+        self.split_mode = split;
+        self.radial_active = radial;
         self.right_stick_x = rx;
         self.right_stick_y = ry;
         self.stick_x = sx;
@@ -118,10 +129,13 @@ mod tests {
             right_stick_y: -8000.0,
             stick_x: 5000.0,
             stick_y: -5000.0,
+            split_mode: true,
+            radial_active: true,
             ..Default::default()
         };
 
         let drained = nav.drain();
+        assert!(nav.split_mode && nav.radial_active, "mode flags are state, not events");
         assert_eq!(drained.dx, 3);
         assert_eq!(drained.select, 1);
         assert_eq!(drained.close, 2);

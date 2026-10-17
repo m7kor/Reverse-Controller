@@ -29,33 +29,33 @@ pub const C_CLOSE_HOVER: egui::Color32 = egui::Color32::from_rgb(215, 38, 38);
 
 /// Controller cheat-sheet shown by the 🎮 key / `?` button / R3.
 pub const HINTS: &[(&str, &str)] = &[
-    ("D-Pad / Left stick", "Move between keys"),
-    ("Up from row 0", "Quick actions & word predictions"),
+    ("D-Pad", "Move between keys"),
+    ("Left stick + A", "Point and click any key"),
+    ("Up from top row", "Quick actions & word predictions"),
     ("L1 / R1 (LB / RB)", "Move text cursor ◄ / ►"),
     ("R2 (RT)", "Capitalize letters (Shift)"),
     ("L2 (LT)", "Numbers & symbols (#+=)"),
     ("R3 (Right stick click)", "Move keyboard anywhere"),
-    ("A", "Press the highlighted key"),
+    ("L3 + R3", "Split keyboard: sticks + LT / RT"),
     ("X / Y", "Backspace / Space"),
     ("RT + X / RT + Y", "Delete word / Auto-complete"),
-    ("Start", "Enter"),
-    ("RT + Start", "Shift + Enter (New line)"),
+    ("Start / RT + Start", "Enter / New line"),
     ("Back (Select)", "Switch language (EN / ع)"),
     ("B / L3", "Close keyboard"),
 ];
 
 pub const HINTS_AR: &[(&str, &str)] = &[
-    ("الأسهم / عصا التحكم", "التنقل بين الأزرار"),
-    ("أعلى من الصف 0", "الإجراءات السريعة واقتراحات الكلمات"),
+    ("الأسهم (D-Pad)", "التنقل بين الأزرار"),
+    ("العصا اليسرى + A", "التأشير والنقر على أي زر"),
+    ("أعلى من الصف الأول", "الإجراءات السريعة واقتراحات الكلمات"),
     ("L1 / R1 (LB / RB)", "تحريك مؤشر الكتابة ◄ / ►"),
-    ("R2 (RT)", "التبديل إلى الحروف الكبيرة / الرموز (Shift)"),
+    ("R2 (RT)", "الحروف الكبيرة / الرموز (Shift)"),
     ("L2 (LT)", "الأرقام والرموز (#+=)"),
     ("R3 (ضغط العصا)", "تحريك موضع الكيبورد بحرية"),
-    ("A", "الضغط على الزر المحدد"),
+    ("L3 + R3", "الكيبورد المنقسم: العصي + LT / RT"),
     ("X / Y", "مسح (Backspace) / مسافة (Space)"),
     ("RT + X / RT + Y", "حذف كلمة / اختيار الاقتراح الأول"),
-    ("Start", "إدخال (Enter)"),
-    ("RT + Start", "سطر جديد (Shift + Enter)"),
+    ("Start / RT + Start", "إدخال / سطر جديد"),
     ("Back (Select)", "تبديل اللغة (ع / EN)"),
     ("B / L3", "إغلاق الكيبورد"),
 ];
@@ -349,7 +349,6 @@ pub fn paint_key(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect, v: &KeyView)
 
     match v.glyph {
         Glyph::Win => draw_win(&painter, draw_rect, fg),
-        Glyph::Pad => draw_pad(&painter, draw_rect, fg),
         Glyph::Enter => draw_enter(&painter, draw_rect, fg),
         Glyph::ShiftEnter => draw_shift_enter(&painter, draw_rect, fg),
         Glyph::Backspace => draw_backspace(&painter, draw_rect, fg),
@@ -358,19 +357,22 @@ pub fn paint_key(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect, v: &KeyView)
                 draw_spacebar(&painter, draw_rect, v.label, dim);
             } else {
                 let n = v.label.chars().count();
-                let arabic = v
-                    .label
-                    .chars()
-                    .next()
-                    .is_some_and(|c| ('\u{0600}'..='\u{06FF}').contains(&c));
+                let arabic = v.label.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c));
                 let k = KEY_H / 40.0;
-                let size = if arabic && n <= 2 {
+                // Letter keys get a large glyph; every function key (Tab, Edit,
+                // the editing panel's words) shares one label size, whatever
+                // the length of its word.
+                let size = if v.special && n > 1 {
+                    13.0 * k
+                } else if arabic && n <= 2 {
                     20.0 * k
                 } else if n > 2 {
                     13.0 * k
                 } else {
                     17.0 * k
                 };
+                // Mixed labels such as "✂ تحرير" must be shaped and reordered
+                // too, or the Arabic word is drawn backwards.
                 let display_text = if arabic && n > 1 {
                     crate::arabic::reshape_ar(v.label)
                 } else {
@@ -471,25 +473,6 @@ pub fn draw_win(p: &egui::Painter, rect: egui::Rect, col: egui::Color32) {
     for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
         let center_sq = egui::pos2(c.x + dx * (s * 0.5 + gap * 0.5), c.y + dy * (s * 0.5 + gap * 0.5));
         p.rect_filled(egui::Rect::from_center_size(center_sq, egui::vec2(s, s)), 1.5, col);
-    }
-}
-
-pub fn draw_pad(p: &egui::Painter, rect: egui::Rect, col: egui::Color32) {
-    let s = rect.height() * 0.26;
-    let c = rect.center();
-    let pt = |dx: f32, dy: f32| egui::pos2(c.x + dx * s, c.y + dy * s);
-    let r = rect.height() * 0.30;
-    p.rect_stroke(
-        egui::Rect::from_center_size(c, egui::vec2(r * 1.9, r)),
-        r * 0.45,
-        egui::Stroke::new(1.6, col),
-    );
-    let d = r * 0.30;
-    p.circle_filled(pt(-0.75, 0.15), d, col);
-    p.circle_filled(pt(0.75, 0.15), d, col);
-    let q = r * 0.17;
-    for (dx, dy) in [(0.35, -0.30), (0.75, -0.30), (0.35, -0.60), (0.75, -0.60)] {
-        p.circle_filled(pt(dx, dy), q, col.gamma_multiply(0.75));
     }
 }
 
@@ -602,9 +585,9 @@ pub fn paint_hints(ui: &mut egui::Ui, area: egui::Rect, lang: Lang) -> bool {
         );
     }
     let footer = if is_ar {
-        crate::arabic::reshape_ar("انقر في أي مكان أو اضغط R3 للإغلاق")
+        crate::arabic::reshape_ar("انقر في أي مكان للإغلاق")
     } else {
-        "Click anywhere or press R3 to dismiss".to_string()
+        "Click anywhere to dismiss".to_string()
     };
     p.text(
         egui::pos2(panel.center().x, panel.bottom() - 10.0),

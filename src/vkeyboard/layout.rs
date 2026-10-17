@@ -58,7 +58,6 @@ impl ShiftState {
 pub enum Glyph {
     Text,
     Win,
-    Pad,
     Enter,
     #[allow(dead_code)]
     ShiftEnter,
@@ -71,6 +70,9 @@ pub enum Act {
     Char(char, Option<char>),
     /// Emit a multi-codepoint string (Arabic ligature "لا").
     Str(&'static str),
+    /// A letter whose Shift variant is a two-letter sequence, like Arabic
+    /// ف → لإ and ل → لأ on the Windows Arabic (101) layout.
+    CharOrStr(char, &'static str),
     /// Press a physical/virtual key.
     Key(NavKey),
     /// The Windows logo key, drawn as a glyph rather than typed.
@@ -115,7 +117,7 @@ pub enum Act {
 
 /// Keys that auto-repeat while held.
 pub fn repeatable(act: Act) -> bool {
-    matches!(act, Act::Char(..) | Act::Str(..) | Act::Backspace | Act::Space)
+    matches!(act, Act::Char(..) | Act::Str(..) | Act::CharOrStr(..) | Act::Backspace | Act::Space)
 }
 
 #[derive(Clone, Copy)]
@@ -194,6 +196,14 @@ impl KDef {
             ..Self::new(ch_str(arabic), Act::Char(arabic, Some(shifted)))
         }
     }
+    /// Arabic letter whose Shift variant is a lam-alef sequence.
+    pub fn ar_lam_alef(arabic: char, shifted: &'static str, corner: char) -> Self {
+        Self {
+            alt: Some(ch_str(corner)),
+            shifted: Some(shifted),
+            ..Self::new(ch_str(arabic), Act::CharOrStr(arabic, shifted))
+        }
+    }
     /// Arabic letter that emits the ligature "لا".
     pub fn ar_ligature(corner: char) -> Self {
         Self { alt: Some(ch_str(corner)), ..Self::new("لا", Act::Str("لا")) }
@@ -214,6 +224,10 @@ pub fn bottom_row(lang: Lang, on_num: bool) -> Vec<KDef> {
         Lang::Ar => ("\u{0639} / EN", "\u{0645}\u{0633}\u{0627}\u{0641}\u{0629}"), // مسافة
     };
     let layer_label = if on_num { "abc" } else { "?123" };
+    let edit_label = match lang {
+        Lang::En => "\u{2702} Edit",
+        Lang::Ar => "\u{2702} \u{062A}\u{062D}\u{0631}\u{064A}\u{0631}", // ✂ تحرير
+    };
     vec![
         KDef::spec(layer_label, Act::ToggleLayer, 1.35),
         KDef::spec("Ctrl", Act::Ctrl, 1.2),
@@ -222,7 +236,8 @@ pub fn bottom_row(lang: Lang, on_num: bool) -> Vec<KDef> {
         KDef::spec(space_label, Act::Space, 5.25),
         KDef::spec("AltGr", Act::AltGr, 1.2),
         KDef::spec(lang_label, Act::Lang, 1.5),
-        KDef::spec("Ctrl", Act::Ctrl, 1.35),
+        // Opens the editing panel (copy, paste, undo, word delete, Home/End).
+        KDef::spec(edit_label, Act::EditTools, 1.35),
     ]
 }
 
@@ -432,7 +447,7 @@ pub fn ar_abc() -> Vec<Vec<KDef>> {
         ] {
             v.push(KDef::ar_shift(a, s, l));
         }
-        v.push(KDef::ar_shift('\u{0641}', '\u{FEF9}', 't')); // ف -> لإ
+        v.push(KDef::ar_lam_alef('\u{0641}', "\u{0644}\u{0625}", 't')); // ف -> لإ
         for (a, s, l) in [
             ('\u{063A}', '\u{0625}', 'y'), // غ -> إ
             ('\u{0639}', '‘', 'u'),         // ع -> ‘
@@ -457,7 +472,7 @@ pub fn ar_abc() -> Vec<Vec<KDef>> {
         ] {
             v.push(KDef::ar_shift(a, s, l));
         }
-        v.push(KDef::ar_shift('\u{0644}', '\u{FEF7}', 'g')); // ل -> لأ
+        v.push(KDef::ar_lam_alef('\u{0644}', "\u{0644}\u{0623}", 'g')); // ل -> لأ
         for (a, s, l) in [
             ('\u{0627}', '\u{0623}', 'h'), // ا -> أ
             ('\u{062A}', '\u{0640}', 'j'), // ت -> ـ (Tatweel)
@@ -506,7 +521,7 @@ pub fn editing_layer(lang: Lang) -> Vec<Vec<KDef>> {
         vec![key("Undo", "تراجع", Act::Undo), key("Redo", "إعادة", Act::Redo), key("Delete word", "حذف كلمة", Act::DeleteWord), key("Delete", "حذف", Act::Key(NavKey::Delete))],
         vec![key("Home", "بداية السطر", Act::Key(NavKey::Home)), key("Left", "يسار", Act::Key(NavKey::Left)), key("Right", "يمين", Act::Key(NavKey::Right)), key("End", "نهاية السطر", Act::Key(NavKey::End))],
         vec![key("Shift", "Shift", Act::Shift), key("Up", "أعلى", Act::Key(NavKey::Up)), key("Down", "أسفل", Act::Key(NavKey::Down)), key("Backspace", "مسح للخلف", Act::Backspace)],
-        vec![key("ABC", "أبجد", Act::EditTools), key("Space", "مسافة", Act::Space), key("Help", "تعليمات", Act::Hints).with_glyph(Glyph::Pad), key("Enter", "إدخال", Act::Enter)],
+        vec![key("ABC", "أبجد", Act::EditTools), key("Space", "مسافة", Act::Space), key("? Help", "؟ تعليمات", Act::Hints), key("Enter", "إدخال", Act::Enter)],
     ]
 }
 

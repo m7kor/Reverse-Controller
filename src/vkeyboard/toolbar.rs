@@ -40,21 +40,21 @@ pub fn paint_toolbar(
     let mut right_btns = Vec::new();
     let start_col = if has_clear { 1 } else { 0 };
 
-    let copy_lbl = if is_ar {
-        crate::arabic::reshape_ar("📄 نسخ")
-    } else {
-        "📄 Copy".to_string()
+    // With word suggestions on screen the shortcuts shrink to their icons so
+    // the suggestions keep enough room to be read.
+    let compact = !typed_word.is_empty();
+    let label = |icon: &str, en: &str, arabic: &str| -> String {
+        if compact {
+            icon.to_string()
+        } else if is_ar {
+            crate::arabic::reshape_ar(&format!("{icon} {arabic}"))
+        } else {
+            format!("{icon} {en}")
+        }
     };
-    let paste_lbl = if is_ar {
-        crate::arabic::reshape_ar("📋 لصق")
-    } else {
-        "📋 Paste".to_string()
-    };
-    let newline_lbl = if is_ar {
-        crate::arabic::reshape_ar("↵ سطر جديد")
-    } else {
-        "↵ New Line".to_string()
-    };
+    let copy_lbl = label("📄", "Copy", "نسخ");
+    let paste_lbl = label("📋", "Paste", "لصق");
+    let newline_lbl = label("↵", "New Line", "سطر جديد");
 
     let add_shortcut = |btns: &mut Vec<RightBtn>, label: String, act: Act| {
         let col = start_col + btns.len();

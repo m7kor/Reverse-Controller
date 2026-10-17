@@ -9,6 +9,29 @@
 #![windows_subsystem = "windows"]
 #![allow(clippy::upper_case_acronyms)]
 
+// Console output is diagnostics only. std's print macros panic when stdout or
+// stderr is a closed pipe (e.g. the terminal that started the app was closed),
+// and release builds abort on panic, so every module uses these versions,
+// which drop the text instead.
+macro_rules! println {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($t)*);
+    }};
+}
+macro_rules! eprintln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($t)*);
+    }};
+}
+macro_rules! print {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($t)*);
+    }};
+}
+
 mod actions;
 pub mod amgp;
 #[cfg(feature = "gui")]
@@ -17,7 +40,10 @@ mod bindings;
 mod config;
 #[cfg(feature = "gui")]
 mod calibration;
+mod doctor;
 mod engine;
+mod gamepads;
+mod install;
 #[cfg(feature = "gui")]
 mod gui;
 mod keys;
@@ -52,6 +78,9 @@ fn print_usage() {
          --print-default   Print the default binding table as JSON and exit\n  \
          --status          Print XInput controller status and exit\n  \
          --validate-config Validate the selected config without starting input\n  \
+         --doctor          Write a troubleshooting report (also saved next to config.json)\n  \
+         --install         Install for this user (Start menu, Installed apps) and start\n  \
+         --uninstall       Remove the installed copy (settings are kept); --quiet skips prompts\n  \
          --help            Show this help\n"
     );
 }
@@ -61,6 +90,9 @@ fn main() {
         let msg = format!("[PANIC] {info}");
         platform::log_debug(&msg);
         eprintln!("{msg}");
+        // Release builds abort right after this hook; let go of anything the
+        // app was holding so no key or button stays stuck system-wide.
+        platform::release_stuck_input();
     }));
     platform::attach_to_interactive_desktop();
     unsafe {
@@ -74,7 +106,7 @@ fn main() {
         }
         let console = GetConsoleWindow();
         if !console.is_null() {
-            let has_cli = std::env::args().any(|a| a == "--help" || a == "-h" || a == "--status");
+            let has_cli = std::env::args().any(|a| matches!(a.as_str(), "--help" | "-h" | "--status" | "--doctor"));
             if !has_cli {
                 ShowWindow(console, 0); // SW_HIDE
             }
@@ -88,6 +120,7 @@ fn main() {
     let mut print_default = false;
     let mut status_only = false;
     let mut validate_config = false;
+    let mut doctor = false;
     let mut stdin_exit = false;
     #[cfg(feature = "gui")]
     let mut demo_kb = false;
@@ -96,6 +129,10 @@ fn main() {
     let mut open_standalone_settings = false;
     let mut trace_pad = false;
     let mut no_elevate = false;
+    let mut from_autostart = false;
+    let mut install_now = false;
+    let mut uninstall_now = false;
+    let mut quiet = false;
     let mut inject_pad: Option<(i16, i16, i16, i16, u16)> = None;
 
     let mut i = 0;
@@ -109,6 +146,7 @@ fn main() {
             "--print-default" => print_default = true,
             "--status" => status_only = true,
             "--validate-config" => validate_config = true,
+            "--doctor" => doctor = true,
             "--stdin-exit" => stdin_exit = true,
             "--caret-probe" => {
                 // Diagnostics: sample the caret heuristic for a few seconds.
@@ -197,7 +235,13 @@ fn main() {
                 }
             }
             "--settings" => open_standalone_settings = true,
+            "--install" => install_now = true,
+            "--uninstall" => uninstall_now = true,
+            "--quiet" => quiet = true,
             "--no-elevate" => no_elevate = true,
+            // Set by the Windows startup entries, so a second copy started at
+            // sign-in stays quiet instead of opening Settings.
+            "--autostart" => from_autostart = true,
             "--elevate" => {
                 if !platform::is_elevated() {
                     println!("[main] Requesting administrator elevation via UAC...");
@@ -222,6 +266,15 @@ fn main() {
         i += 1;
     }
 
+    if uninstall_now {
+        install::uninstall_command(quiet);
+        return;
+    }
+    if install_now {
+        install::install_command();
+        return;
+    }
+
     // Automatic Administrator elevation: if not elevated, relaunch elevated via UAC immediately!
     if validate_config {
         match Config::try_load(&config_path) {
@@ -230,7 +283,26 @@ fn main() {
         }
         return;
     }
+    if doctor {
+        let report = doctor::run(&config_path);
+        print!("{}", report.text);
+        match doctor::save(&config_path, &report.text) {
+            Ok(path) => println!("\nReport saved to {}", path.display()),
+            Err(error) => eprintln!("\nCould not save the report: {error}"),
+        }
+        std::process::exit(if report.problems == 0 { 0 } else { 1 });
+    }
     let is_cli_helper = status_only || print_default || write_default;
+    // A downloaded copy started by hand offers to install itself (once; the
+    // answer "no" is remembered). Asked before elevation, so the installed
+    // copy belongs to the user, not to an administrator prompt.
+    #[cfg(feature = "gui")]
+    let demo_or_test = demo_kb || inject_pad.is_some();
+    #[cfg(not(feature = "gui"))]
+    let demo_or_test = inject_pad.is_some();
+    if !is_cli_helper && !open_standalone_settings && !from_autostart && !demo_or_test && !elevated && install::offer_on_launch() {
+        return;
+    }
     if !elevated && !no_elevate && !is_cli_helper {
         println!("[main] Elevating process to run as Administrator...");
         if let Ok(()) = platform::relaunch_elevated(&args) {
@@ -259,7 +331,10 @@ fn main() {
 
     if print_default {
         let cfg = Config::default();
-        println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
+        match serde_json::to_string_pretty(&cfg) {
+            Ok(text) => println!("{text}"),
+            Err(error) => eprintln!("{error}"),
+        }
         return;
     }
 
@@ -314,18 +389,32 @@ fn main() {
     let _instance_mutex = instance_mutex;
     if already_running {
         eprintln!("[main] Another instance of Controller Companion is already running. Exiting.");
+        // Starting the app again by hand is a request to see it: open Settings
+        // for the running copy rather than exiting silently.
+        #[cfg(feature = "gui")]
+        if !from_autostart {
+            gui::open_settings_process(&config_path);
+        }
+        let _ = from_autostart;
         return;
     }
+    // A previous run that crashed or was killed may have left an injected
+    // modifier or mouse button down; clear it before taking control.
+    platform::release_stuck_input();
 
-    let config = if config_path.exists() {
-        Config::try_load(&config_path).unwrap_or_else(|error| {
-            platform::log_debug(&format!("[main] Startup stopped: {error}"));
-            eprintln!("{error}");
-            std::process::exit(2);
-        })
-    } else {
-        Config::default()
-    };
+    // Never refuse to start over a damaged settings file: fall back to the
+    // last good copy (or defaults) and tell the user once the OSD is up.
+    let (config, load_outcome) = config::load_resilient(&config_path);
+    match &load_outcome {
+        config::LoadOutcome::RestoredBackup { broken } | config::LoadOutcome::ResetToDefaults { broken } => {
+            platform::log_debug(&format!(
+                "[main] settings file was damaged; moved to {} ({:?})",
+                broken.display(),
+                load_outcome
+            ));
+        }
+        _ => {}
+    }
     println!("[main] config: {}", config_path.display());
     println!(
         "[main] mouse speed={} accel={} wheel={} | deadzones L={} R={} | enabled={}",
@@ -337,18 +426,24 @@ fn main() {
         config.enabled
     );
 
-    if elevated && config.autostart {
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = platform::install_scheduled_task(&exe.to_string_lossy());
-        }
-    }
-
-    // Apply autostart registration to match the persisted setting.
-    if let Ok(exe) = std::env::current_exe() {
-        let quoted = format!("\"{}\"", exe.display());
-        if let Err(e) = platform::set_autostart(config.autostart, &quoted) {
-            eprintln!("[main] autostart apply failed: {e}");
-        }
+    // Match the Windows startup entries to the setting. `schtasks` can take a
+    // moment, so this runs in the background instead of delaying input.
+    {
+        let autostart = config.autostart;
+        std::thread::spawn(move || {
+            let Ok(exe) = std::env::current_exe() else { return };
+            if elevated {
+                if autostart {
+                    let _ = platform::install_scheduled_task(&exe.to_string_lossy());
+                } else if let Err(error) = platform::remove_scheduled_task() {
+                    platform::log_debug(&format!("[main] could not remove logon task: {error}"));
+                }
+            }
+            let command = format!("\"{}\" --autostart", exe.display());
+            if let Err(e) = platform::set_autostart(autostart, &command) {
+                platform::log_debug(&format!("[main] autostart apply failed: {e}"));
+            }
+        });
     }
 
     let xinput = match win32::XInputApi::load() {
@@ -369,7 +464,24 @@ fn main() {
     osd::spawn();
     osd::set_osd_enabled(config.osd_enabled);
     sound::set_sfx_enabled(config.keyboard.mechanical_sfx);
+    match &load_outcome {
+        config::LoadOutcome::RestoredBackup { .. } => {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(800));
+                osd::show_info("🛟", "Settings restored", "The settings file was damaged; the last good copy is in use");
+            });
+        }
+        config::LoadOutcome::ResetToDefaults { .. } => {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(800));
+                osd::show_info("🛟", "Settings reset", "The settings file was damaged; defaults are in use");
+            });
+        }
+        _ => {}
+    }
 
+    #[cfg(feature = "gui")]
+    predict::init_learning(predict::memory_path_for(&config_path));
     let mut engine = Engine::new(xinput, config);
     engine.set_trace_pad(trace_pad);
     if let Some((lx, ly, rx, ry, buttons)) = inject_pad {
@@ -419,6 +531,9 @@ fn main() {
             let run2 = running.clone();
             let eng2 = engine.clone();
             std::thread::spawn(move || {
+                // Text-box detection uses accessibility (COM) queries here,
+                // away from the input thread.
+                platform::com_init_thread();
                 let mut opened_at: Option<Instant> = None;
                 while run2.load(Ordering::Relaxed) {
                     let enabled = eng2.lock().map(|e| e.config().vk_auto_show).unwrap_or(false);
@@ -449,15 +564,7 @@ fn main() {
                             let was_vis = f2.load(Ordering::SeqCst);
                             if !was_vis {
                                 crate::platform::log_debug("[main] Text click detected -> surfacing virtual keyboard");
-                                platform::push_foreground();
-                                f2.store(true, Ordering::SeqCst);
-                                let work = platform::work_area();
-                                let origin = crate::config::KeyboardPrefs::default().anchor(work, None);
-                                let base_w = (crate::config::KB_BASE_W).round() as i32;
-                                let base_h = (crate::config::KB_BASE_H).round() as i32;
-                                platform::place_window("CCVKbd", origin.0, origin.1, base_w, base_h);
-                                platform::set_window_visible("CCVKbd", true);
-                                vkeyboard::request_vkeyboard_repaint();
+                                vkeyboard::show_keyboard(&f2);
                                 opened_at = Some(Instant::now());
                             }
                         }
@@ -469,33 +576,34 @@ fn main() {
     }
 
     // --- System-wide hotkey: toggle input remapping on/off ---
+    // Re-registered by the config watcher whenever Settings changes it.
     {
         let hotkey = engine.lock().map(|e| e.config().toggle_hotkey.clone()).unwrap_or_default();
-        if let Some((mods, vk)) = crate::config::parse_hotkey(&hotkey) {
-            println!("[main] hotkey {hotkey} toggles input");
-            platform::hotkey_watch_start(mods, vk);
-            let hk_engine = engine.clone();
-            let hk_running = running.clone();
-            std::thread::spawn(move || {
-                while hk_running.load(Ordering::Relaxed) {
-                    if platform::take_hotkey() {
-                        let now = hk_engine.lock().map(|mut e| e.toggle_enabled()).unwrap_or(false);
-                        println!("[main] hotkey -> input {}", if now { "ON" } else { "OFF" });
-                    }
-                    std::thread::sleep(Duration::from_millis(40));
+        platform::set_hotkey(crate::config::parse_hotkey(&hotkey));
+        let hk_engine = engine.clone();
+        let hk_running = running.clone();
+        std::thread::spawn(move || {
+            while hk_running.load(Ordering::Relaxed) {
+                if platform::take_hotkey() {
+                    let now = hk_engine.lock().map(|mut e| e.toggle_enabled()).unwrap_or(false);
+                    println!("[main] hotkey -> input {}", if now { "ON" } else { "OFF" });
                 }
-            });
-        }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
     }
 
     // --- Engine thread: fixed-rate poll loop (~125 Hz) ---
     let eng = engine.clone();
     let run = running.clone();
+    let heartbeat = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let beat = heartbeat.clone();
     let engine_thread = std::thread::spawn(move || {
         platform::attach_thread_to_desktop();
         let target = Duration::from_micros(8_000); // 125 Hz
         let mut last = Instant::now();
         while run.load(Ordering::Relaxed) {
+            beat.store((steady_seconds() * 1000.0) as u64, Ordering::Relaxed);
             let start = Instant::now();
             let elapsed = start.duration_since(last).as_secs_f64();
             last = start;
@@ -503,7 +611,7 @@ fn main() {
             let steady = steady_seconds();
             let is_connected = if let Ok(mut e) = eng.lock() {
                 e.update(steady, elapsed.min(0.1));
-                e.is_connected()
+                e.connected_cached()
             } else {
                 false
             };
@@ -519,24 +627,61 @@ fn main() {
         }
     });
 
+    // Watchdog: if the input loop stops ticking (stuck in a system call or
+    // waiting on a lock), let go of everything it might be holding so the user
+    // keeps a working mouse and keyboard, and record it for diagnosis.
+    {
+        let watch_running = running.clone();
+        std::thread::Builder::new()
+            .name("cc-input-watchdog".into())
+            .spawn(move || {
+                let mut stalled = false;
+                while watch_running.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let last = heartbeat.load(Ordering::Relaxed);
+                    let now = (steady_seconds() * 1000.0) as u64;
+                    let silent_ms = now.saturating_sub(last);
+                    if last != 0 && silent_ms > 2000 {
+                        if !stalled {
+                            stalled = true;
+                            platform::log_debug(&format!("[watchdog] input loop silent for {silent_ms} ms; releasing held input"));
+                            platform::release_stuck_input();
+                        }
+                    } else if stalled {
+                        stalled = false;
+                        platform::log_debug("[watchdog] input loop recovered");
+                    }
+                }
+            })
+            .ok();
+    }
+
     // Publish the engine's real state for the separate settings process.
     let status_engine = engine.clone();
     let status_running = running.clone();
     let status_path = runtime_status::path_for_config(&config_path);
     let status_thread = std::thread::spawn(move || {
         let mut publish_failed = false;
+        let mut last: Option<(runtime_status::RuntimeStatus, Instant)> = None;
         while status_running.load(Ordering::Relaxed) {
-            if let Ok(engine) = status_engine.lock() {
-                match runtime_status::publish(&status_path, &engine.runtime_status()) {
-                    Ok(()) => publish_failed = false,
-                    Err(error) if !publish_failed => {
-                        eprintln!("[status] publish failed: {error}");
-                        publish_failed = true;
+            let current = status_engine.lock().ok().map(|engine| engine.runtime_status());
+            if let Some(status) = current {
+                // Write when something changed, plus a heartbeat so readers can
+                // tell a running engine from a stale file.
+                if runtime_status::should_publish(last.as_ref(), &status) {
+                    match runtime_status::publish(&status_path, &status) {
+                        Ok(()) => publish_failed = false,
+                        Err(error) if !publish_failed => {
+                            eprintln!("[status] publish failed: {error}");
+                            publish_failed = true;
+                        }
+                        Err(_) => {}
                     }
-                    Err(_) => {}
+                    last = Some((status.clone(), Instant::now()));
                 }
+                tray::refresh_status(&status);
             }
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(250));
         }
         let _ = std::fs::remove_file(status_path);
     });
@@ -550,7 +695,11 @@ fn main() {
         let _sw_path = config_path.clone();
         std::thread::spawn(move || {
             let dir = crate::config::profiles_dir();
-            let mut current = String::new();
+            // Our own windows (keyboard, settings) must not count as switching apps.
+            let own_exe = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+            let mut cached: Option<(String, Option<crate::profiles::ProfileEntry>, Instant)> = None;
             while sw_running.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(900));
                 let enabled = sw_engine
@@ -558,42 +707,53 @@ fn main() {
                     .map(|e| e.config().auto_profile_switch)
                     .unwrap_or(false);
                 if !enabled {
+                    if let Ok(mut e) = sw_engine.lock() {
+                        e.clear_auto_profile();
+                    }
                     continue;
                 }
                 let Some(exe) = crate::platform::foreground_process_name() else {
                     continue;
                 };
-                if exe == current {
+                if own_exe.as_deref() == Some(exe.as_str()) {
                     continue;
                 }
-                let hit = crate::profiles::match_process(&dir, &exe);
-                current = exe.clone();
-                if let Ok(mut e) = sw_engine.lock() {
-                    let target_stem = match &hit {
-                        Some(h) => h
-                            .path
-                            .file_stem()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string(),
-                        None => crate::profiles::DEFAULT_NAME.to_string(),
-                    };
-                    if e.config().active_profile == target_stem {
-                        continue;
-                    }
-                    if target_stem == crate::profiles::DEFAULT_NAME {
-                        println!("[main] auto-switch -> '{target_stem}' for {exe}");
-                        e.set_profile(crate::profiles::DEFAULT_NAME, crate::bindings::default_profile());
-                    } else if let Some(h) = hit {
+                // Re-read the profile folder when focus moves to another
+                // program, and every few seconds in case profiles were edited.
+                let stale = cached
+                    .as_ref()
+                    .is_none_or(|(e, _, at)| *e != exe || at.elapsed() > Duration::from_secs(10));
+                if stale {
+                    cached = Some((exe.clone(), crate::profiles::match_process(&dir, &exe), Instant::now()));
+                }
+                let Some((_, hit, _)) = &cached else { continue };
+                let Ok(mut e) = sw_engine.lock() else { continue };
+                match hit {
+                    Some(h) => {
+                        let stem = h.path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                        if e.auto_profile() == Some(stem.as_str()) {
+                            continue;
+                        }
                         match crate::profiles::load(&h.path) {
                             Ok(p) => {
-                                println!("[main] auto-switch -> '{target_stem}' for {exe}");
-                                e.set_profile(&target_stem, p.bindings);
-                                crate::osd::show_profile(&target_stem);
+                                println!("[main] auto-switch -> '{stem}' for {exe}");
+                                e.set_auto_profile(&stem, p.bindings);
+                                crate::osd::show_profile(&stem);
                             }
-                            Err(err) => eprintln!("[main] auto-switch to '{target_stem}' failed: {err}"),
+                            Err(err) => eprintln!("[main] auto-switch to '{stem}' failed: {err}"),
                         }
                     }
+                    None if e.auto_profile().is_some() => {
+                        e.clear_auto_profile();
+                        let name = if e.config().active_profile.is_empty() {
+                            crate::profiles::DEFAULT_NAME.to_string()
+                        } else {
+                            e.config().active_profile.clone()
+                        };
+                        println!("[main] auto-switch back to '{name}'");
+                        crate::osd::show_profile(&name);
+                    }
+                    None => {}
                 }
             }
         });
@@ -613,6 +773,9 @@ fn main() {
                         match e.reload_from_disk(&watch_path) {
                             Ok(()) => {
                                 last_mod = Some(m);
+                                platform::set_hotkey(crate::config::parse_hotkey(&e.config().toggle_hotkey));
+                                osd::set_osd_enabled(e.config().osd_enabled);
+                                sound::set_sfx_enabled(e.config().keyboard.mechanical_sfx);
                                 println!("[main] reloaded updated config from {}", watch_path.display());
                             }
                             Err(error) => eprintln!("[main] config reload deferred: {error}"),
@@ -622,6 +785,13 @@ fn main() {
             }
         }
     });
+
+    // First run: open the tutorial so a new user learns the controller in a
+    // minute instead of guessing.
+    #[cfg(feature = "gui")]
+    if load_outcome == config::LoadOutcome::Fresh && !demo_kb {
+        gui::open_settings_on(&config_path, Some("tutorial"));
+    }
 
     // Reclaim cold startup memory pages so background memory footprint drops immediately
     crate::platform::trim_working_set();
@@ -684,13 +854,38 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     platform::log_debug("[main] running flag dropped, joining threads");
+    predict::flush();
     let _ = tray_thread.join();
     let _ = engine_thread.join();
     let _ = status_thread.join();
 
-    // Persist current runtime config (including enabled state) to disk.
+    // Write back only what changed at runtime (on/off, a profile chosen from
+    // the controller, the keyboard position). Everything else stays exactly as
+    // saved, so an auto-switched game profile or a scanned controller slot can
+    // never overwrite the user's settings.
     if let Ok(e) = engine.lock() {
-        let _ = e.config().save(&config_path);
+        #[cfg(feature = "gui")]
+        let keyboard_position = vkeyboard::last_position();
+        #[cfg(not(feature = "gui"))]
+        let keyboard_position = None;
+        let changes = config::RuntimeChanges {
+            enabled: e.is_enabled(),
+            profile: e.changed_base_profile(),
+            keyboard_position,
+        };
+        let saved = if config_path.exists() {
+            Config::try_load(&config_path).map(|disk| changes.apply_to(disk))
+        } else {
+            Ok(changes.apply_to(e.config().clone()))
+        };
+        match saved {
+            Ok(cfg) => {
+                if let Err(error) = cfg.save(&config_path) {
+                    platform::log_debug(&format!("[main] saving settings on exit failed: {error}"));
+                }
+            }
+            Err(error) => platform::log_debug(&format!("[main] settings left untouched on exit: {error}")),
+        }
     }
     platform::log_debug("[main] bye");
     println!("[main] bye");

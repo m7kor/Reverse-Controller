@@ -28,7 +28,7 @@ impl DisplayMode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum Modifier {
     Back,
 }
@@ -70,6 +70,16 @@ pub enum Action {
     ToggleEnabled,
     /// Activate a named profile at runtime.
     ActivateProfile(String),
+    /// Switch to the next saved profile (Default first, then by file name).
+    NextProfile,
+    /// Switch to the previous saved profile.
+    PrevProfile,
+    /// Move the pointer to the centre of the next monitor.
+    CursorNextMonitor,
+    /// Move the pointer to the centre of the active window.
+    CenterCursor,
+    /// Left double-click at the pointer.
+    DoubleClick,
     /// Toggle mouse left-click drag-lock (holds down Left Click until clicked again).
     ToggleDragLock,
     /// Win+H: Start Windows Voice Typing / Speech Dictation.
@@ -130,6 +140,11 @@ impl<'de> Deserialize<'de> for Action {
                 "PrevVirtualDesktop" => Ok(Action::PrevVirtualDesktop),
                 "RadialMenu" => Ok(Action::RadialMenu),
                 "WindowDrag" => Ok(Action::WindowDrag),
+                "NextProfile" => Ok(Action::NextProfile),
+                "PrevProfile" => Ok(Action::PrevProfile),
+                "CursorNextMonitor" => Ok(Action::CursorNextMonitor),
+                "CenterCursor" => Ok(Action::CenterCursor),
+                "DoubleClick" => Ok(Action::DoubleClick),
                 other => Err(serde::de::Error::custom(format!("unknown action {other:?}"))),
             },
             serde_json::Value::Object(m) => {
@@ -203,6 +218,12 @@ impl<'de> Deserialize<'de> for Action {
                     "NextVirtualDesktop" => Ok(Action::NextVirtualDesktop),
                     "PrevVirtualDesktop" => Ok(Action::PrevVirtualDesktop),
                     "RadialMenu" => Ok(Action::RadialMenu),
+                    "WindowDrag" => Ok(Action::WindowDrag),
+                    "NextProfile" => Ok(Action::NextProfile),
+                    "PrevProfile" => Ok(Action::PrevProfile),
+                    "CursorNextMonitor" => Ok(Action::CursorNextMonitor),
+                    "CenterCursor" => Ok(Action::CenterCursor),
+                    "DoubleClick" => Ok(Action::DoubleClick),
                     other => Err(serde::de::Error::custom(format!("unknown action {other:?}"))),
                 }
             }
@@ -261,6 +282,26 @@ mod tests {
             (r#""RadialMenu""#, Action::RadialMenu),
         ] {
             assert_eq!(serde_json::from_str::<Action>(json).expect(json), want);
+        }
+    }
+
+    #[test]
+    fn every_unit_action_loads_in_string_and_object_form() {
+        for want in [
+            Action::WindowDrag,
+            Action::RadialMenu,
+            Action::NextProfile,
+            Action::PrevProfile,
+            Action::NextVirtualDesktop,
+            Action::VoiceDictation,
+            Action::CursorNextMonitor,
+            Action::CenterCursor,
+            Action::DoubleClick,
+        ] {
+            let text = serde_json::to_string(&want).expect("serialize");
+            assert_eq!(serde_json::from_str::<Action>(&text).expect(&text), want);
+            let object = format!("{{{text}:null}}");
+            assert_eq!(serde_json::from_str::<Action>(&object).expect(&object), want);
         }
     }
 

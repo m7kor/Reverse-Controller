@@ -13,7 +13,9 @@ type HKEY = *mut c_void;
 type HINSTANCE = *mut c_void;
 type LPARAM = isize;
 type LRESULT = isize;
-type LSTATUS = isize;
+// LONG: the registry API returns 32 bits; the upper half of the register is
+// undefined, so a wider type could misread success as an error.
+type LSTATUS = i32;
 type DWORD = u32;
 type BOOL = i32;
 type WPARAM = usize;
@@ -113,7 +115,24 @@ pub const fn pack_hotkey(mods: u32, vk: u32) -> u64 {
 /// The hook must swallow the key so it does not also reach the focused app —
 /// otherwise the hotkey would type a stray letter every time it is pressed.
 pub fn hotkey_watch_start(mods: u32, vk: u32) {
-    HOTKEY.store(pack_hotkey(mods, vk), std::sync::atomic::Ordering::SeqCst);
+    set_hotkey(Some((mods, vk)));
+}
+
+/// Change (or with `None`, disable) the global toggle shortcut at runtime.
+///
+/// The keyboard hook is installed the first time a shortcut is set and stays
+/// for the life of the process; disabling just clears the chord it matches.
+pub fn set_hotkey(chord: Option<(u32, u32)>) {
+    use std::sync::atomic::Ordering;
+    static HOOK_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some((mods, vk)) = chord else {
+        HOTKEY.store(0, Ordering::SeqCst);
+        return;
+    };
+    HOTKEY.store(pack_hotkey(mods, vk), Ordering::SeqCst);
+    if HOOK_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(|| unsafe {
         let hook = SetWindowsHookExW(
             WH_KEYBOARD_LL,
@@ -218,9 +237,28 @@ pub fn note_controller_left_click() {
     LAST_LCLICK_TIME.store(now_ms, std::sync::atomic::Ordering::SeqCst);
     LAST_CLICK_WAS_CONTROLLER.store(true, std::sync::atomic::Ordering::SeqCst);
     push_foreground();
+    // Only remember where the click landed. Deciding whether that is a text
+    // box can mean a cross-process accessibility query, which blocks while
+    // the target app is busy; it runs on the text-click watcher instead of
+    // the input thread, so a hung window can never freeze the controller.
     unsafe {
         let mut pt: POINT = std::mem::zeroed();
-        if GetCursorPos(&mut pt) != 0 && (is_cursor_ibeam() || point_is_text_field(pt)) {
+        if GetCursorPos(&mut pt) != 0 {
+            if let Ok(mut pending) = PENDING_CLICK.lock() {
+                *pending = Some((pt.x, pt.y));
+            }
+        }
+    }
+}
+
+/// Where the last controller click landed, waiting to be classified.
+static PENDING_CLICK: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+
+/// Classify a pending controller click (call from a background thread).
+fn classify_pending_click() {
+    let pending = PENDING_CLICK.lock().ok().and_then(|mut p| p.take());
+    if let Some((x, y)) = pending {
+        if is_cursor_ibeam() || point_is_text_field(POINT { x, y }) {
             CLICK_IN_TEXT.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -301,6 +339,28 @@ extern "system" {
 #[link(name = "gdi32")]
 extern "system" {
     fn DeleteObject(ho: *mut c_void) -> BOOL;
+}
+
+/// Is the pointer showing the hand cursor (a link or button in browsers,
+/// Electron apps and many modern programs)? Reading the cursor shape is a
+/// cheap local call, unlike accessibility queries, which also make browsers
+/// switch on their full accessibility tree and slow down.
+pub fn cursor_is_hand() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetCursorInfo(pci: *mut CURSORINFO) -> BOOL;
+        fn LoadCursorW(inst: HINSTANCE, name: usize) -> HCURSOR;
+    }
+    static HAND: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let hand = *HAND.get_or_init(|| unsafe { LoadCursorW(std::ptr::null_mut(), 32649) as usize }); // IDC_HAND
+    if hand == 0 {
+        return false;
+    }
+    unsafe {
+        let mut ci: CURSORINFO = std::mem::zeroed();
+        ci.cbSize = std::mem::size_of::<CURSORINFO>() as DWORD;
+        GetCursorInfo(&mut ci) != 0 && ci.flags != 0 && ci.hCursor as usize == hand
+    }
 }
 
 pub fn is_cursor_ibeam() -> bool {
@@ -388,7 +448,7 @@ extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM)
         let want_mods = (want >> 32) as u32;
         let want_vk = (want & 0xFFFF_FFFF) as u32;
         let hs = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-        if hs.vk_code == want_vk && current_modifiers() == want_mods {
+        if want_vk != 0 && hs.vk_code == want_vk && current_modifiers() == want_mods {
             HOTKEY_FIRED.store(true, Ordering::SeqCst);
             // Returning 1 swallows the key so the focused app never sees it.
             return 1;
@@ -550,7 +610,9 @@ fn window_class_at(pt: POINT) -> Option<String> {
 pub fn mouse_watch_start() {}
 
 /// Consume the "clicked inside a text box" edge (true at most once per click).
+/// Classifies a pending click first, so call this off the input thread.
 pub fn take_text_click() -> bool {
+    classify_pending_click();
     CLICK_IN_TEXT.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
 
@@ -606,6 +668,9 @@ const SWP_NOSIZE: u32 = 0x0001;
 #[link(name = "user32")]
 extern "system" {
     fn ShowWindow(hwnd: HWND, cmd: i32) -> BOOL;
+    fn ShowWindowAsync(hwnd: HWND, cmd: i32) -> BOOL;
+    fn IsIconic(hwnd: HWND) -> BOOL;
+    fn GetCurrentThreadId() -> DWORD;
     fn SetWindowPos(
         hwnd: HWND,
         insert_after: HWND,
@@ -622,6 +687,19 @@ extern "system" {
 
 const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
+
+/// Extra `SetWindowPos` flag when `hwnd` belongs to another thread: the call
+/// is posted instead of waiting for that thread, so the input loop, tray and
+/// watchers never stall behind a busy window.
+fn async_flag(hwnd: HWND) -> u32 {
+    let owner = unsafe { GetWindowThreadProcessId(hwnd, std::ptr::null_mut()) };
+    if owner != 0 && owner != unsafe { GetCurrentThreadId() } {
+        SWP_ASYNCWINDOWPOS
+    } else {
+        0
+    }
+}
 const GA_ROOT: u32 = 2;
 const SW_RESTORE: i32 = 9;
 
@@ -660,7 +738,7 @@ pub fn move_window_at_cursor(dx: i32, dy: i32) {
             }
         }
         if IsZoomed(root) != 0 {
-            ShowWindow(root, SW_RESTORE);
+            ShowWindowAsync(root, SW_RESTORE);
         }
         let mut rect: RECT = std::mem::zeroed();
         if GetWindowRect(root, &mut rect) != 0 {
@@ -673,7 +751,9 @@ pub fn move_window_at_cursor(dx: i32, dy: i32) {
                 rect.top + dy,
                 width,
                 height,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                // Asynchronous: the window belongs to another program, and a
+                // synchronous move would wait for it, freezing input if it hangs.
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
             );
             crate::win32::set_cursor_pos(pt.x + dx, pt.y + dy);
         }
@@ -710,7 +790,7 @@ pub fn place_window(title: &str, x: i32, y: i32, w: i32, h: i32) -> bool {
             y,
             w,
             h,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE | async_flag(hwnd),
         );
         true
     }
@@ -734,7 +814,7 @@ pub fn move_window(title: &str, x: i32, y: i32) -> bool {
             y,
             0,
             0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | async_flag(hwnd),
         );
         true
     }
@@ -825,7 +905,12 @@ pub fn set_window_visible(title: &str, visible: bool) -> bool {
         if hwnd.is_null() {
             return false;
         }
-        ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        let cmd = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
+        if async_flag(hwnd) != 0 {
+            ShowWindowAsync(hwnd, cmd);
+        } else {
+            ShowWindow(hwnd, cmd);
+        }
         if visible {
             InvalidateRect(hwnd, std::ptr::null(), 0);
         }
@@ -845,7 +930,7 @@ extern "system" {
 
 /// Force a window (found by exact title) to be a topmost, tool, no-activate
 /// overlay so clicking its keys never steals focus from the target app.
-pub fn enforce_overlay_style(title: &str) -> bool {
+pub fn enforce_overlay_style(title: &str, backdrop: bool) -> bool {
     unsafe {
         let hwnd = find_target_hwnd(title);
         if hwnd.is_null() {
@@ -880,15 +965,18 @@ pub fn enforce_overlay_style(title: &str) -> bool {
             &dark_mode as *const _ as *const c_void,
             std::mem::size_of::<BOOL>() as DWORD,
         );
-        let corner_round: u32 = 2; // DWMWCP_ROUND
+        // The keyboard is a rounded acrylic panel. The radial menu is round, so
+        // it gets neither a backdrop nor window corners: either would paint a
+        // grey square behind the circle.
+        let corner_round: u32 = if backdrop { 2 } else { 1 }; // DWMWCP_ROUND / DONOTROUND
         let _ = DwmSetWindowAttribute(
             hwnd,
             33, // DWMWA_WINDOW_CORNER_PREFERENCE
             &corner_round as *const _ as *const c_void,
             std::mem::size_of::<u32>() as DWORD,
         );
-        // Enable Windows 11 Acrylic Backdrop (DWMWA_SYSTEMBACKDROP_TYPE = 38, DWMSBT_TRANSIENTWINDOW = 3)
-        let backdrop_type: u32 = 3;
+        // DWMWA_SYSTEMBACKDROP_TYPE = 38: DWMSBT_TRANSIENTWINDOW (acrylic) = 3, DWMSBT_NONE = 1
+        let backdrop_type: u32 = if backdrop { 3 } else { 1 };
         let _ = DwmSetWindowAttribute(
             hwnd,
             38, // DWMWA_SYSTEMBACKDROP_TYPE
@@ -899,6 +987,32 @@ pub fn enforce_overlay_style(title: &str) -> bool {
     }
 }
 
+/// Give a window the app icon embedded in the executable (title bar and
+/// taskbar). Does nothing when the build has no icon resource.
+pub fn set_app_icon(hwnd: HWND) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn LoadImageW(inst: HINSTANCE, name: usize, kind: u32, cx: i32, cy: i32, flags: u32) -> *mut c_void;
+        fn SendMessageW(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
+    }
+    const IMAGE_ICON: u32 = 1;
+    const WM_SETICON: u32 = 0x0080;
+    unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        for (which, size) in [(1usize, 32), (0usize, 16)] {
+            // ICON_BIG = 1, ICON_SMALL = 0; resource id 1 (build.rs)
+            let icon = LoadImageW(module, 1, IMAGE_ICON, size, size, 0);
+            if !icon.is_null() {
+                SendMessageW(hwnd, WM_SETICON, which, icon as LPARAM);
+            }
+        }
+    }
+}
+
 /// Apply Windows 11 immersive dark mode, rounded corners, and Mica backdrop to a standard application window.
 pub fn enforce_window_modern_theme(title: &str) -> bool {
     unsafe {
@@ -906,6 +1020,7 @@ pub fn enforce_window_modern_theme(title: &str) -> bool {
         if hwnd.is_null() {
             return false;
         }
+        set_app_icon(hwnd);
         let dark_mode: BOOL = 1;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -973,6 +1088,122 @@ pub fn work_area() -> (i32, i32, i32, i32) {
         let (sw, sh) = screen_size();
         (0, 0, sw, sh)
     }
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn MonitorFromPoint(pt: POINT, flags: DWORD) -> *mut c_void;
+}
+
+fn monitor_work_area(mon: *mut c_void) -> Option<(i32, i32, i32, i32)> {
+    if mon.is_null() {
+        return None;
+    }
+    unsafe {
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as DWORD;
+        if GetMonitorInfoW(mon, &mut mi) == 0 {
+            return None;
+        }
+        let r = mi.rcWork;
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        (w > 100 && h > 100).then_some((r.left, r.top, w, h))
+    }
+}
+
+/// Work area of the monitor the user is working on: the one holding the
+/// window being typed into, else the foreground window, else the cursor.
+pub fn work_area_active() -> (i32, i32, i32, i32) {
+    let ov = overlay_hwnd();
+    let target = FOREGROUND.load(std::sync::atomic::Ordering::SeqCst);
+    let fg = foreground_hwnd();
+    for hwnd in [target, fg] {
+        if hwnd != 0 && hwnd != ov && unsafe { IsWindow(hwnd as HWND) } != 0 {
+            let mon = unsafe { MonitorFromWindow(hwnd as HWND, MONITOR_DEFAULTTONEAREST) };
+            if let Some(area) = monitor_work_area(mon) {
+                return area;
+            }
+        }
+    }
+    if let Some((x, y)) = crate::win32::get_cursor_pos() {
+        return work_area_at(x, y);
+    }
+    work_area()
+}
+
+/// Every monitor's work area, ordered left to right, then top to bottom.
+pub fn monitor_work_areas() -> Vec<(i32, i32, i32, i32)> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumDisplayMonitors(
+            hdc: *mut c_void,
+            clip: *const RECT,
+            callback: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut RECT, LPARAM) -> BOOL,
+            data: LPARAM,
+        ) -> BOOL;
+    }
+    unsafe extern "system" fn collect(mon: *mut c_void, _: *mut c_void, _: *mut RECT, data: LPARAM) -> BOOL {
+        let out = &mut *(data as *mut Vec<(i32, i32, i32, i32)>);
+        if let Some(area) = monitor_work_area(mon) {
+            out.push(area);
+        }
+        1
+    }
+    let mut areas: Vec<(i32, i32, i32, i32)> = Vec::new();
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            collect,
+            &mut areas as *mut _ as LPARAM,
+        );
+    }
+    areas.sort_by_key(|a| (a.0, a.1));
+    areas
+}
+
+/// The monitor after the one containing `(x, y)`, wrapping around; `None`
+/// with a single monitor.
+pub fn next_monitor_area(
+    areas: &[(i32, i32, i32, i32)],
+    x: i32,
+    y: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    if areas.len() < 2 {
+        return None;
+    }
+    let inside = |a: &(i32, i32, i32, i32)| x >= a.0 && x < a.0 + a.2 && y >= a.1 && y < a.1 + a.3;
+    let current = areas.iter().position(inside).unwrap_or(0);
+    Some(areas[(current + 1) % areas.len()])
+}
+
+/// Jump the pointer to the centre of the next monitor.
+pub fn cursor_to_next_monitor() {
+    let Some((x, y)) = crate::win32::get_cursor_pos() else {
+        return;
+    };
+    if let Some((ax, ay, aw, ah)) = next_monitor_area(&monitor_work_areas(), x, y) {
+        crate::win32::set_cursor_pos(ax + aw / 2, ay + ah / 2);
+    }
+}
+
+/// Put the pointer in the middle of the active window (or the current
+/// monitor when no window has focus).
+pub fn center_cursor_on_foreground() {
+    let fg = foreground_hwnd();
+    let mut rc: RECT = unsafe { std::mem::zeroed() };
+    if fg != 0 && fg != overlay_hwnd() && unsafe { GetWindowRect(fg as HWND, &mut rc) } != 0 {
+        crate::win32::set_cursor_pos((rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2);
+        return;
+    }
+    let (ax, ay, aw, ah) = work_area_active();
+    crate::win32::set_cursor_pos(ax + aw / 2, ay + ah / 2);
+}
+
+/// Work area of the monitor nearest to the screen point `(x, y)`.
+pub fn work_area_at(x: i32, y: i32) -> (i32, i32, i32, i32) {
+    let mon = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+    monitor_work_area(mon).unwrap_or_else(work_area)
 }
 
 /// The current foreground window handle (as usize) — changes when focus moves.
@@ -1342,6 +1573,26 @@ pub fn foreground_process_name() -> Option<String> {
     }
 }
 
+/// [`foreground_process_name`], cached for ~250ms so the 125Hz loop can ask
+/// every frame without opening a process handle each time.
+pub fn foreground_process_name_cached() -> Option<String> {
+    use std::sync::Mutex;
+    type Entry = (Instant, usize, Option<String>);
+    static CACHE: Mutex<Option<Entry>> = Mutex::new(None);
+    let hwnd = foreground_hwnd();
+    let Ok(mut g) = CACHE.lock() else {
+        return foreground_process_name();
+    };
+    if let Some((at, h, name)) = g.as_ref() {
+        if *h == hwnd && at.elapsed() < Duration::from_millis(250) {
+            return name.clone();
+        }
+    }
+    let name = foreground_process_name();
+    *g = Some((Instant::now(), hwnd, name.clone()));
+    name
+}
+
 /// True when the foreground window covers its whole monitor (borderless
 /// fullscreen heuristic). Cached for ~250ms to keep the 125Hz loop cheap.
 pub fn is_fullscreen_cached() -> bool {
@@ -1548,13 +1799,83 @@ pub fn attach_thread_to_desktop() {
     }
 }
 
+/// Bring an existing top-level window with exactly this title to the front.
+/// Returns false when no such window exists.
+pub fn focus_window_titled(title: &str) -> bool {
+    let wide = to_wide(title);
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
+    if hwnd.is_null() {
+        return false;
+    }
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindowAsync(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+    }
+    true
+}
+
+/// Initialise COM on the calling thread (needed for accessibility queries).
+pub fn com_init_thread() {
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoInitializeEx(reserved: *mut c_void, coinit: u32) -> i32;
+    }
+    unsafe {
+        CoInitializeEx(std::ptr::null_mut(), 0x2); // COINIT_APARTMENTTHREADED
+    }
+}
+
+/// Release modifier keys and mouse buttons that Windows reports as held.
+///
+/// Used when the app starts and from the panic hook: an injected key-down
+/// whose key-up never arrives (because the app crashed or was killed) leaves
+/// Ctrl, Shift or the left button stuck system-wide. Only keys that are down
+/// get a key-up, so nothing stray reaches the focused app.
+pub fn release_stuck_input() {
+    const KEYS: [u16; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C]; // L/R Shift, Ctrl, Alt, Win
+    let mut inputs = Vec::new();
+    for vk in KEYS {
+        if crate::win32::async_key_down(vk as i32) {
+            let mut flags = crate::win32::KEYEVENTF_KEYUP;
+            if matches!(vk, 0xA3 | 0xA5 | 0x5B | 0x5C) {
+                flags |= crate::win32::KEYEVENTF_EXTENDEDKEY;
+            }
+            inputs.push(crate::win32::key_input(vk, crate::win32::map_vk_to_scancode(vk), flags));
+        }
+    }
+    for (vk, up) in [
+        (0x01, crate::win32::MOUSEEVENTF_LEFTUP),
+        (0x02, crate::win32::MOUSEEVENTF_RIGHTUP),
+        (0x04, crate::win32::MOUSEEVENTF_MIDDLEUP),
+    ] {
+        if crate::win32::async_key_down(vk) {
+            inputs.push(crate::win32::mouse_input(0, 0, 0, up));
+        }
+    }
+    if !inputs.is_empty() {
+        crate::win32::send_inputs(&inputs);
+    }
+    crate::win32::global_stop_all_vibration();
+}
+
 /// Write a line to %APPDATA%\ControllerCompanionRust\debug.log for live diagnostics.
 pub fn log_debug(msg: &str) {
     use std::io::Write;
+    // Tests must not write into the user's real log.
+    if cfg!(test) {
+        return;
+    }
     let path = crate::config::default_config_path()
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("debug.log");
+    // Keep one previous log and start a fresh one past 1 MB, so the log can
+    // never grow without bound on a machine that runs for months.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1024 * 1024) {
+        let _ = std::fs::rename(&path, path.with_extension("old.log"));
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "[{:.3}] {msg}", crate::steady_seconds());
     }
@@ -1638,7 +1959,7 @@ pub fn relaunch_elevated(args: &[String]) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("{e}"))?;
     let exe_wide: Vec<u16> = exe.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
     let op_wide: Vec<u16> = "runas\0".encode_utf16().collect();
-    let params = args.join(" ");
+    let params = join_command_line(args);
     let params_wide: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
 
     let res = unsafe {
@@ -1655,6 +1976,61 @@ pub fn relaunch_elevated(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("ShellExecute runas returned error code {:?}", res))
+    }
+}
+
+/// Join arguments into one Windows command line, quoting any that contain
+/// spaces, tabs or quotes so a path like `C:\My Settings\config.json`
+/// survives the relaunch intact.
+pub fn join_command_line(args: &[String]) -> String {
+    args.iter()
+        .map(|a| {
+            if !a.is_empty() && !a.contains([' ', '\t', '"']) {
+                return a.clone();
+            }
+            let mut out = String::from('"');
+            let mut backslashes = 0;
+            for c in a.chars() {
+                match c {
+                    '\\' => backslashes += 1,
+                    '"' => {
+                        out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                        out.push('"');
+                        backslashes = 0;
+                    }
+                    _ => {
+                        out.extend(std::iter::repeat_n('\\', backslashes));
+                        out.push(c);
+                        backslashes = 0;
+                    }
+                }
+            }
+            out.extend(std::iter::repeat_n('\\', backslashes * 2));
+            out.push('"');
+            out
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Remove the elevated logon task, if one exists. Best effort: deleting it
+/// needs administrator rights, and a missing task is not an error.
+pub fn remove_scheduled_task() -> Result<(), String> {
+    let out = std::process::Command::new("schtasks")
+        .args(["/query", "/tn", "ControllerCompanionRust"])
+        .output()
+        .map_err(|e| format!("failed to run schtasks: {e}"))?;
+    if !out.status.success() {
+        return Ok(());
+    }
+    let out = std::process::Command::new("schtasks")
+        .args(["/delete", "/tn", "ControllerCompanionRust", "/f"])
+        .output()
+        .map_err(|e| format!("failed to run schtasks: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
 
@@ -1684,6 +2060,33 @@ pub fn install_scheduled_task(exe_path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod hotkey_tests {
     use super::*;
+
+    #[test]
+    fn next_monitor_wraps_and_needs_two_screens() {
+        let one = [(0, 0, 1920, 1040)];
+        assert_eq!(next_monitor_area(&one, 10, 10), None);
+        let two = [(-1280, 0, 1280, 984), (0, 0, 1920, 1040)];
+        assert_eq!(next_monitor_area(&two, 100, 100), Some(two[0]));
+        assert_eq!(next_monitor_area(&two, -100, 100), Some(two[1]));
+        // A point between screens starts from the first one.
+        assert_eq!(next_monitor_area(&two, 5000, 5000), Some(two[1]));
+    }
+
+    #[test]
+    fn command_line_quotes_paths_with_spaces_and_escapes_quotes() {
+        let args = vec![
+            "--config".to_string(),
+            r"C:\My Settings\config.json".to_string(),
+            "plain".to_string(),
+            r#"say "hi""#.to_string(),
+            r"C:\dir with space\".to_string(),
+        ];
+        assert_eq!(
+            join_command_line(&args),
+            r#"--config "C:\My Settings\config.json" plain "say \"hi\"" "C:\dir with space\\""#
+        );
+        assert_eq!(join_command_line(&[String::new()]), r#""""#);
+    }
 
     #[test]
     fn chords_round_trip_through_the_packed_word() {

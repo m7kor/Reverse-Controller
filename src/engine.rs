@@ -57,12 +57,77 @@ fn modifier_bit(m: Option<Modifier>) -> u8 {
     }
 }
 
-fn input_active(input: Input, buttons: u16, lt: u8, rt: u8, trigger_threshold: u8) -> bool {
+/// Is `input` pressed this frame? `held` is whether it was pressed last frame.
+///
+/// Analog triggers release a quarter below the press threshold, so a trigger
+/// resting right at the threshold cannot chatter a held Ctrl or Shift.
+fn input_active(input: Input, buttons: u16, lt: u8, rt: u8, trigger_threshold: u8, held: bool) -> bool {
+    let threshold = if held {
+        trigger_threshold - trigger_threshold / 4
+    } else {
+        trigger_threshold
+    };
     match input {
-        Input::LeftTrigger => lt >= trigger_threshold,
-        Input::RightTrigger => rt >= trigger_threshold,
+        Input::LeftTrigger => lt >= threshold,
+        Input::RightTrigger => rt >= threshold,
         _ => (buttons & button_flag(input)) != 0,
     }
+}
+
+/// The learned controller layouts in the form the joystick reader takes.
+fn pad_overrides(config: &Config) -> Vec<(u16, u16, crate::gamepads::Layout)> {
+    config.custom_pad_layouts.iter().map(|o| (o.vendor, o.product, o.layout)).collect()
+}
+
+/// Human-readable XInput battery level, as used in OSD notifications.
+fn battery_desc(level: u8) -> &'static str {
+    match level {
+        0x03 => "Full",
+        0x02 => "Medium",
+        0x01 => "Low",
+        _ => "Empty",
+    }
+}
+
+const BATTERY_TYPE_WIRED: u8 = 0x01;
+/// XInput battery types that report a real charge level (alkaline, NiMH).
+/// Third-party pads often report "unknown" with level 0, which is not "empty".
+fn battery_has_level(kind: u8) -> bool {
+    matches!(kind, 0x02 | 0x03)
+}
+const BATTERY_LEVEL_LOW: u8 = 0x01;
+/// How often a connected controller's battery is polled for the low warning.
+const BATTERY_POLL_SECS: f64 = 30.0;
+
+/// Steady-clock milliseconds at which the haptic watchdog stops all motors;
+/// zero when nothing is scheduled.
+static RUMBLE_DEADLINE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Schedule the fail-safe stop for a haptic pulse.
+///
+/// One watchdog thread serves every pulse, and a newer pulse simply moves the
+/// deadline. Stopping is independent of the engine loop, so a stalled loop can
+/// never leave a motor running.
+fn schedule_rumble_stop(after_secs: f64) {
+    use std::sync::Once;
+    static WATCHDOG: Once = Once::new();
+    let deadline = ((crate::steady_seconds() + after_secs.max(0.01)) * 1000.0) as u64;
+    RUMBLE_DEADLINE_MS.store(deadline, Ordering::SeqCst);
+    WATCHDOG.call_once(|| {
+        let _ = std::thread::Builder::new().name("cc-haptic-watchdog".into()).spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let deadline = RUMBLE_DEADLINE_MS.load(Ordering::SeqCst);
+            let now = (crate::steady_seconds() * 1000.0) as u64;
+            if deadline != 0
+                && now >= deadline
+                && RUMBLE_DEADLINE_MS
+                    .compare_exchange(deadline, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                w32::global_stop_all_vibration();
+            }
+        });
+    });
 }
 
 /// Radial dead-zone plus the shaping the reference `v39 Smooth Native Scroll`
@@ -258,6 +323,26 @@ struct MoveState {
     cruise_time: f64,
     scroll_accum_x: f32,
     scroll_accum_y: f32,
+    /// Smart-pointer slowdown currently applied, 0 (none) to 1 (full); eased
+    /// so the pointer never jerks when it enters or leaves a target.
+    target_slow: f32,
+}
+
+/// How much the smart pointer should slow down, 0..1, for a stick deflection
+/// `norm` (0..1). Fine aiming over a target gets the full slowdown; it fades
+/// out as the stick nears full tilt, so a deliberate sweep is never held back.
+fn target_slowdown(norm: f32, over_target: bool) -> f32 {
+    if !over_target {
+        return 0.0;
+    }
+    let t = ((norm - 0.6) / 0.35).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
+/// Move `current` toward `target` with a ~60 ms time constant.
+fn ease_toward(current: f32, target: f32, dt: f64) -> f32 {
+    let k = (dt as f32 / 0.06).clamp(0.0, 1.0);
+    current + (target - current) * k
 }
 
 /// A command a binding can raise for the engine to apply on the next frame.
@@ -265,6 +350,8 @@ struct MoveState {
 pub enum PendingCommand {
     ToggleEnabled,
     ActivateProfile(String),
+    /// `true` = next profile, `false` = previous.
+    CycleProfile(bool),
     ToggleDragLock,
 }
 
@@ -274,9 +361,26 @@ fn command_for(action: &Action) -> Option<PendingCommand> {
     match action {
         Action::ToggleEnabled => Some(PendingCommand::ToggleEnabled),
         Action::ActivateProfile(name) => Some(PendingCommand::ActivateProfile(name.clone())),
+        Action::NextProfile => Some(PendingCommand::CycleProfile(true)),
+        Action::PrevProfile => Some(PendingCommand::CycleProfile(false)),
         Action::ToggleDragLock => Some(PendingCommand::ToggleDragLock),
         _ => None,
     }
+}
+
+/// The profile after (or before) `current` in `stems`, wrapping around.
+/// An unknown current profile starts from the first entry.
+fn step_profile<'a>(stems: &'a [String], current: &str, forward: bool) -> &'a str {
+    if stems.is_empty() {
+        return crate::profiles::DEFAULT_NAME;
+    }
+    let n = stems.len();
+    let next = match stems.iter().position(|s| s.eq_ignore_ascii_case(current)) {
+        Some(i) if forward => (i + 1) % n,
+        Some(i) => (i + n - 1) % n,
+        None => 0,
+    };
+    &stems[next]
 }
 
 pub struct Engine {
@@ -290,8 +394,31 @@ pub struct Engine {
     /// activation). Applied at the top of `update` so the rest of the frame
     /// sees consistent state.
     pending_command: Option<PendingCommand>,
-    /// A profile the bindings asked to activate; the main thread picks it up.
-    pub pending_profile: Option<String>,
+    /// The profile the user chose (from config.json, Settings or a profile
+    /// button). Auto-switching overrides it temporarily and always returns here.
+    base_profile: String,
+    base_bindings: Vec<PadBindingDef>,
+    /// The profile selected by a process rule, while one is in effect.
+    auto_profile: Option<String>,
+    /// The user switched profiles from the controller since the last load, so
+    /// the choice must be written back on exit.
+    manual_profile_changed: bool,
+    /// Held inputs are already released; skips repeating the release on every
+    /// frame while disabled, paused or disconnected.
+    quiesced: bool,
+    /// Lowest battery level already warned about for this connection.
+    battery_warned: bool,
+    next_battery_check: f64,
+    /// Earliest time to look for a controller on another XInput slot.
+    next_slot_scan: f64,
+    /// PlayStation, Switch Pro and generic controllers, used while no XInput
+    /// pad is connected.
+    generic: crate::gamepads::GenericPads,
+    /// Name of the controller in use, for status displays.
+    pad_name: String,
+    /// Last battery reading `(type, level)`, refreshed by the input loop so
+    /// status readers never query the controller while holding the lock.
+    battery_cache: Option<(u8, u8)>,
     digital: Vec<DigitalEntry>,
     left_stick: Vec<StickEntry>,
     right_stick: Vec<StickEntry>,
@@ -360,6 +487,8 @@ pub fn trigger_haptic(left: u16, right: u16, duration_secs: f64) {
 
 impl Engine {
     pub fn new(xinput: w32::XInputApi, config: Config) -> Engine {
+        let base_profile = config.active_profile.clone();
+        let base_bindings = config.bindings.clone();
         let mut eng = Engine {
             xinput,
             key: KeyPresser::new(),
@@ -367,7 +496,17 @@ impl Engine {
             trace_pad: false,
             last_trace: std::time::Instant::now() - std::time::Duration::from_secs(10),
             pending_command: None,
-            pending_profile: None,
+            base_profile,
+            base_bindings,
+            auto_profile: None,
+            manual_profile_changed: false,
+            quiesced: true,
+            battery_warned: false,
+            next_battery_check: 0.0,
+            battery_cache: None,
+            next_slot_scan: 0.0,
+            generic: crate::gamepads::GenericPads::default(),
+            pad_name: String::new(),
             digital: Vec::new(),
             left_stick: Vec::new(),
             right_stick: Vec::new(),
@@ -409,6 +548,7 @@ impl Engine {
             last_cursor_pos: None,
             was_fullscreen_paused: false,
         };
+        eng.generic.set_overrides(pad_overrides(&eng.config));
         eng.rebuild_bindings();
         eng
     }
@@ -476,12 +616,13 @@ impl Engine {
     pub fn apply_config(&mut self, config: Config) {
         // Release anything currently held so state matches the new config.
         self.release_all_if_needed();
-        self.key.release_all();
+        self.generic.set_overrides(pad_overrides(&config));
+        self.base_profile = config.active_profile.clone();
+        self.base_bindings = config.bindings.clone();
+        self.auto_profile = None;
+        self.manual_profile_changed = false;
         self.config = config;
         self.rebuild_bindings();
-        self.move_state = MoveState::default();
-        self.current_mods = 0;
-        self.next_mods = 0;
         #[cfg(feature = "gui")]
         crate::vkeyboard::update_prefs(self.config.keyboard.clone());
     }
@@ -490,19 +631,84 @@ impl Engine {
         &self.config
     }
 
-    /// Switch to a named profile, keeping the rest of the user's settings.
-    ///
-    /// Only the bindings and the recorded profile name change, so mouse speed,
-    /// dead zones and keyboard preferences survive a switch.
-    pub fn set_profile(&mut self, stem: &str, bindings: Vec<crate::bindings::PadBindingDef>) {
+    /// Swap the live bindings, keeping every other setting.
+    fn load_bindings(&mut self, stem: &str, bindings: Vec<PadBindingDef>) {
         self.release_all_if_needed();
-        self.key.release_all();
         self.config.active_profile = stem.to_string();
         self.config.bindings = bindings;
         self.rebuild_bindings();
-        self.move_state = MoveState::default();
-        self.current_mods = 0;
-        self.next_mods = 0;
+    }
+
+    /// Make `stem` the user's chosen profile, keeping the rest of the settings.
+    ///
+    /// Only the bindings and the recorded profile name change, so mouse speed,
+    /// dead zones and keyboard preferences survive a switch.
+    pub fn set_profile(&mut self, stem: &str, bindings: Vec<PadBindingDef>) {
+        let stem = if stem == crate::profiles::DEFAULT_NAME { "" } else { stem };
+        self.base_profile = stem.to_string();
+        self.base_bindings = bindings.clone();
+        self.auto_profile = None;
+        self.manual_profile_changed = true;
+        self.load_bindings(stem, bindings);
+    }
+
+    /// Temporarily use a profile selected by a process rule.
+    pub fn set_auto_profile(&mut self, stem: &str, bindings: Vec<PadBindingDef>) {
+        self.auto_profile = Some(stem.to_string());
+        self.load_bindings(stem, bindings);
+    }
+
+    /// Leave the process-rule profile and return to the user's choice.
+    pub fn clear_auto_profile(&mut self) {
+        if self.auto_profile.take().is_some() {
+            let (stem, bindings) = (self.base_profile.clone(), self.base_bindings.clone());
+            self.load_bindings(&stem, bindings);
+        }
+    }
+
+    /// The process-rule profile currently in effect, if any.
+    pub fn auto_profile(&self) -> Option<&str> {
+        self.auto_profile.as_deref()
+    }
+
+    /// The user's chosen profile when it was changed from the controller since
+    /// the configuration was loaded; `None` when config.json is already right.
+    pub fn changed_base_profile(&self) -> Option<(String, Vec<PadBindingDef>)> {
+        self.manual_profile_changed
+            .then(|| (self.base_profile.clone(), self.base_bindings.clone()))
+    }
+
+    /// Switch to a saved profile by file stem, as the user's choice.
+    fn activate_named_profile(&mut self, stem: &str) -> Result<(), String> {
+        if stem.is_empty() || stem == crate::profiles::DEFAULT_NAME {
+            self.set_profile("", default_profile());
+            return Ok(());
+        }
+        let path = crate::config::profiles_dir().join(format!("{stem}.json"));
+        let profile = crate::profiles::load(&path)?;
+        self.set_profile(stem, profile.bindings);
+        Ok(())
+    }
+
+    /// Step through Default and the saved profiles in file-name order.
+    fn cycle_profile(&mut self, forward: bool) {
+        let mut stems: Vec<String> = crate::profiles::list(&crate::config::profiles_dir())
+            .into_iter()
+            .filter(|p| !p.legacy)
+            .filter_map(|p| p.path.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .collect();
+        stems.sort_by_key(|s| s.to_lowercase());
+        stems.insert(0, crate::profiles::DEFAULT_NAME.to_string());
+        let current = if self.base_profile.is_empty() {
+            crate::profiles::DEFAULT_NAME
+        } else {
+            self.base_profile.as_str()
+        };
+        let next = step_profile(&stems, current, forward).to_string();
+        match self.activate_named_profile(&next) {
+            Ok(()) => crate::osd::show_profile(&next),
+            Err(error) => crate::platform::log_debug(&format!("[engine] profile switch failed: {error}")),
+        }
     }
 
     pub fn set_enabled(&mut self, on: bool) {
@@ -528,6 +734,7 @@ impl Engine {
         self.config.enabled
     }
 
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))] // used by the settings window
     pub fn is_connected(&self) -> bool {
         self.xinput
             .get_state(self.config.controller.controller_index)
@@ -535,6 +742,7 @@ impl Engine {
     }
 
     /// (battery_type, battery_level) for the active controller, if available.
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))] // used by the settings window
     pub fn battery_info(&self) -> Option<(u8, u8)> {
         self.xinput
             .battery(self.config.controller.controller_index)
@@ -549,11 +757,36 @@ impl Engine {
         self.xinput.get_state(index).map(|s| s.Gamepad)
     }
 
+    /// Live state of whichever controller is connected — XInput first, else a
+    /// PlayStation, Switch Pro or generic pad — with its name (settings view).
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn preview_pad(&mut self, index: u32) -> Option<(w32::XINPUT_GAMEPAD, String)> {
+        if let Some(s) = self.xinput.get_state(index) {
+            return Some((s.Gamepad, "Xbox controller (XInput)".to_string()));
+        }
+        let gp = self.generic.poll(crate::steady_seconds())?;
+        Some((gp, self.generic.active_name().unwrap_or_default()))
+    }
+
+    /// An XInput pad is in use: hand back any non-XInput controller.
+    fn use_xinput_pad(&mut self) {
+        if self.pad_name != "Xbox controller (XInput)" {
+            self.generic.release();
+            self.pad_name = "Xbox controller (XInput)".to_string();
+        }
+    }
+
+    /// Connection state as last seen by the input loop (no controller query).
+    pub fn connected_cached(&self) -> bool {
+        self.was_connected
+    }
+
     pub fn runtime_status(&self) -> crate::runtime_status::RuntimeStatus {
-        let connected = self.is_connected();
+        // Cached values only: this runs on the status thread every 250 ms, and
+        // querying the controller here would stall the input loop meanwhile.
+        let connected = self.was_connected;
         let enabled = self.is_enabled();
-        let fullscreen_paused = self.config.disable_in_fullscreen
-            && crate::platform::is_fullscreen_cached();
+        let fullscreen_paused = self.fullscreen_paused();
         let active_profile = if self.config.active_profile.is_empty() {
             crate::profiles::DEFAULT_NAME.to_string()
         } else {
@@ -569,7 +802,9 @@ impl Engine {
             connected,
             controller_index: self.config.controller.controller_index,
             active_profile,
-            battery_level: self.battery_info().map(|(_, level)| level),
+            battery_level: self.battery_cache.filter(|(kind, _)| battery_has_level(*kind)).map(|(_, level)| level),
+            battery_wired: self.battery_cache.is_some_and(|(kind, _)| kind == BATTERY_TYPE_WIRED),
+            controller_name: if connected { self.pad_name.clone() } else { String::new() },
         }
     }
 
@@ -593,14 +828,7 @@ impl Engine {
         let idx = self.config.controller.controller_index;
         self.xinput.set_vibration(idx, left, right);
         self.rumble_until = crate::steady_seconds() + duration;
-
-        // Guaranteed fail-safe timer: regardless of engine loop state or slot changes,
-        // stop all motors across all 4 slots once duration expires!
-        let sleep_dur = std::time::Duration::from_secs_f64(duration.max(0.01));
-        std::thread::spawn(move || {
-            std::thread::sleep(sleep_dur);
-            w32::global_stop_all_vibration();
-        });
+        schedule_rumble_stop(duration);
     }
 
     /// Apply a command raised by a binding during the previous frame.
@@ -617,8 +845,19 @@ impl Engine {
                 self.toggle_enabled();
             }
             PendingCommand::ActivateProfile(name) => {
-                crate::osd::show_profile(&name);
-                self.pending_profile = Some(name);
+                match self.activate_named_profile(&name) {
+                    Ok(()) => {
+                        crate::osd::show_profile(&name);
+                        self.rumble_pulse(15000, 15000, 0.06);
+                    }
+                    Err(error) => {
+                        crate::osd::show_info("⚠", "Profile not found", &name);
+                        crate::platform::log_debug(&format!("[engine] activate '{name}' failed: {error}"));
+                    }
+                }
+            }
+            PendingCommand::CycleProfile(forward) => {
+                self.cycle_profile(forward);
                 self.rumble_pulse(15000, 15000, 0.06);
             }
             PendingCommand::ToggleDragLock => {
@@ -708,11 +947,19 @@ impl Engine {
         let gp = match self.injected {
             Some(g) => g,
             None => match self.xinput.get_state(idx) {
-                Some(s) => s.Gamepad,
+                Some(s) => {
+                    self.use_xinput_pad();
+                    s.Gamepad
+                }
                 None => {
-                    // Auto-scan other slots 0..4 if active slot is disconnected
+                    // Auto-scan the other slots for a replacement pad. Polling an
+                    // empty XInput slot is slow, so scan at most twice a second.
                     let mut found = None;
-                    for slot in 0..4 {
+                    let scan_due = now >= self.next_slot_scan;
+                    if scan_due {
+                        self.next_slot_scan = now + 0.5;
+                    }
+                    for slot in (0..4).filter(|_| scan_due) {
                         if slot != idx {
                             if let Some(s) = self.xinput.get_state(slot) {
                                 found = Some((slot, s.Gamepad));
@@ -727,19 +974,22 @@ impl Engine {
                         self.toggle_chord_down = false;
                         self.config.controller.controller_index = new_slot;
                         idx = new_slot;
-                        if !self.was_connected {
-                            crate::platform::log_debug(&format!("[engine] Controller connected on slot {new_slot}"));
-                            self.was_connected = true;
-                            self.rumble_pulse(15000, 20000, 0.15);
-                            if let Some(b) = self.xinput.battery(new_slot) {
-                                let is_wired = b.BatteryType == 0x01;
-                                let desc = match b.BatteryLevel {
-                                    0x03 => "Full",
-                                    0x02 => "Medium",
-                                    0x01 => "Low",
-                                    _ => "Empty",
-                                };
-                                crate::osd::show_battery(desc, is_wired);
+                        self.use_xinput_pad();
+                        g
+                    } else if let Some(g) = (scan_due || self.generic.is_active())
+                        .then(|| self.generic.poll(now))
+                        .flatten()
+                    {
+                        // No XInput pad on any slot: a PlayStation, Switch Pro
+                        // or generic controller drives the same pipeline. A
+                        // third-party Xbox-mode pad is also visible to the
+                        // joystick API, so this waits for a full XInput scan
+                        // that found nothing rather than grabbing that pad
+                        // with the wrong layout between scans.
+                        if let Some(name) = self.generic.active_name() {
+                            if self.pad_name != name {
+                                crate::platform::log_debug(&format!("[engine] using {name}"));
+                                self.pad_name = name;
                             }
                         }
                         g
@@ -747,10 +997,12 @@ impl Engine {
                         if self.was_connected {
                             crate::platform::log_debug("[engine] All controllers disconnected");
                             self.was_connected = false;
+                            self.pad_name.clear();
+                            self.battery_cache = None;
                             self.rumble_until = 0.0;
                             self.xinput.stop_all_vibration();
                         }
-                        self.release_all_if_needed();
+                        self.quiesce();
                         self.toggle_chord_down = false;
                         return;
                     }
@@ -761,16 +1013,21 @@ impl Engine {
             self.was_connected = true;
             crate::platform::log_debug(&format!("[engine] Controller connected on slot {idx}"));
             self.rumble_pulse(15000, 20000, 0.15);
-            if let Some(b) = self.xinput.battery(idx) {
-                let is_wired = b.BatteryType == 0x01;
-                let desc = match b.BatteryLevel {
-                    0x03 => "Full",
-                    0x02 => "Medium",
-                    0x01 => "Low",
-                    _ => "Empty",
-                };
-                crate::osd::show_battery(desc, is_wired);
+            self.battery_warned = false;
+            self.next_battery_check = now + BATTERY_POLL_SECS;
+            self.battery_cache = None;
+            if self.injected.is_none() {
+                if let Some(b) = self.xinput.battery(idx) {
+                    self.battery_cache = Some((b.BatteryType, b.BatteryLevel));
+                    if b.BatteryType == BATTERY_TYPE_WIRED || battery_has_level(b.BatteryType) {
+                        crate::osd::show_battery(battery_desc(b.BatteryLevel), b.BatteryType == BATTERY_TYPE_WIRED);
+                    }
+                }
             }
+        }
+        if self.injected.is_none() && now >= self.next_battery_check {
+            self.next_battery_check = now + BATTERY_POLL_SECS;
+            self.check_low_battery(idx);
         }
         let mut buttons = gp.wButtons;
 
@@ -782,6 +1039,11 @@ impl Engine {
                 if now - start >= 2.5 && !self.guide_hold_powered_off {
                     self.guide_hold_powered_off = true;
                     self.rumble_pulse(35000, 35000, 0.4);
+                    // Guide is bound to the Windows key by default. Releasing a
+                    // lone Win key opens Start, so tap an unassigned key first:
+                    // Windows then treats Win as part of a shortcut and stays put.
+                    w32::send_tap(0xE8, 0);
+                    self.release_all_if_needed();
                     self.xinput.power_off_controller(idx);
                 }
             }
@@ -810,13 +1072,14 @@ impl Engine {
         }
 
         if !self.config.enabled {
-            self.release_all_if_needed();
+            self.quiesce();
             return;
         }
         // Fullscreen auto-disable (port of FullScreenLoopDisabler).
         // Automatically pauses desktop bindings and returns the gamepad to its native
-        // controller behavior when a fullscreen game/app is in focus.
-        if self.config.disable_in_fullscreen && crate::platform::is_fullscreen_cached() {
+        // controller behavior when a fullscreen game/app is in focus. Browsers and
+        // video players on the exception list keep desktop control.
+        if self.fullscreen_paused() {
             if !self.was_fullscreen_paused {
                 self.was_fullscreen_paused = true;
                 crate::platform::log_debug("[engine] Fullscreen game detected -> desktop control paused (native gamepad mode)");
@@ -829,12 +1092,14 @@ impl Engine {
                     self.nav_mouse_down = false;
                 }
             }
-            self.release_all_if_needed();
+            // Never touch the motors here: the game owns the rumble now.
+            self.quiesce();
             return;
         } else if self.was_fullscreen_paused {
             self.was_fullscreen_paused = false;
             crate::platform::log_debug("[engine] Fullscreen game exited -> desktop control resumed");
         }
+        self.quiesced = false;
 
         let (lx, ly) = shape_stick(
             gp.sThumbLX as f32,
@@ -906,23 +1171,25 @@ impl Engine {
                 self.nav_was_moving_right = false;
                 self.nav_right_cooldown = 0.0;
             }
-            self.feed_nav(&gp, dt);
+            let (repositioning, split, radial) = self
+                .vk_nav
+                .as_ref()
+                .and_then(|n| n.lock().ok().map(|n| (n.is_repositioning, n.split_mode, n.radial_active)))
+                .unwrap_or((false, false, false));
+            self.feed_nav(&gp, dt, split);
 
-            // While virtual keyboard is visible, analog mouse motion and scrolling
-            // MUST continue running smoothly so the mouse NEVER freezes!
+            // While the keyboard is visible the pointer and wheel keep working,
+            // except where a stick has been given to the overlay: both sticks
+            // steer the split keyboard, the left stick steers the radial menu,
+            // and the right stick moves the keyboard in move mode.
             let left = std::mem::take(&mut self.left_stick);
-            self.update_stick(&left, (lx, ly), now, dt, true);
+            let left_axes = if split || radial { (0.0, 0.0) } else { (lx, ly) };
+            self.update_stick(&left, left_axes, now, dt, true);
             self.left_stick = left;
 
             let right = std::mem::take(&mut self.right_stick);
-            let is_repositioning = if let Some(nav_arc) = &self.vk_nav {
-                nav_arc.lock().map(|n| n.is_repositioning).unwrap_or(false)
-            } else {
-                false
-            };
-            if !is_repositioning {
-                self.update_stick(&right, (rx, ry), now, dt, false);
-            }
+            let right_axes = if split || repositioning { (0.0, 0.0) } else { (rx, ry) };
+            self.update_stick(&right, right_axes, now, dt, false);
             self.right_stick = right;
             return;
         } else if self.nav_active {
@@ -985,7 +1252,7 @@ impl Engine {
         let mut produced: u8 = 0;
         for e in &self.digital {
             if let Action::Modifier(m) = &e.def.action {
-                let active = input_active(e.def.input, buttons, lt, rt, trigger_threshold);
+                let active = input_active(e.def.input, buttons, lt, rt, trigger_threshold, e.is_down);
                 let gate = modifier_bit(e.def.modifier);
                 if active && (gate == 0 || (self.current_mods & gate) == gate) {
                     produced |= modifier_bit(Some(*m));
@@ -1003,7 +1270,7 @@ impl Engine {
         for e in &mut self.digital {
             let this_mod = modifier_bit(e.def.modifier);
             let not_consumed_yet = consumed_button != Some(e.def.input) || consumed_mod == this_mod;
-            let active = input_active(e.def.input, buttons, lt, rt, trigger_threshold);
+            let active = input_active(e.def.input, buttons, lt, rt, trigger_threshold, e.is_down);
             let gate_ok = this_mod == 0 || (self.current_mods & this_mod) != 0;
             let should = not_consumed_yet && active && gate_ok;
             if should {
@@ -1105,9 +1372,17 @@ impl Engine {
             return;
         }
         let mut m = self.config.mouse.clone();
+        let mut factor = 1.0;
         if m.sniper_enabled && self.current_lt > 0 {
             let trigger_ratio = (self.current_lt as f32) / 255.0;
-            let factor = 1.0 - (1.0 - m.sniper_scale) * trigger_ratio;
+            factor *= 1.0 - (1.0 - m.sniper_scale) * trigger_ratio;
+        }
+        // Smart pointer: ease off over links and buttons.
+        let norm = ((axes.0 * axes.0 + axes.1 * axes.1).sqrt() / 32767.0).min(1.0);
+        let over_target = m.smart_pointer && self.injected.is_none() && crate::platform::cursor_is_hand();
+        self.move_state.target_slow = ease_toward(self.move_state.target_slow, target_slowdown(norm, over_target), dt);
+        factor *= 1.0 - (1.0 - m.smart_pointer_speed.clamp(0.1, 1.0)) * self.move_state.target_slow;
+        if factor < 1.0 {
             m.speed *= factor;
             if m.speed_x > 0.0 { m.speed_x *= factor; }
             if m.speed_y > 0.0 { m.speed_y *= factor; }
@@ -1147,6 +1422,13 @@ impl Engine {
             dt,
             flip_y,
         );
+        if ticks_x == 0.0 && ticks_y == 0.0 {
+            // Stick released: drop the leftover fraction so the next touch
+            // does not fire a stray wheel tick.
+            self.move_state.scroll_accum_x = 0.0;
+            self.move_state.scroll_accum_y = 0.0;
+            return;
+        }
         self.move_state.scroll_accum_y += ticks_y;
         self.move_state.scroll_accum_x += ticks_x;
 
@@ -1165,9 +1447,10 @@ impl Engine {
 
     /// Feed controller input to the virtual keyboard while it is visible.
     /// The engine is in "keyboard mode": no normal bindings run this frame.
-    fn feed_nav(&mut self, gp: &w32::XINPUT_GAMEPAD, dt: f64) {
+    fn feed_nav(&mut self, gp: &w32::XINPUT_GAMEPAD, dt: f64, split: bool) {
         let b = gp.wButtons;
         let newly = b & !self.nav_prev_buttons;
+        const STICK_TH: i16 = 16000;
 
         let cur_pos = crate::win32::get_cursor_pos();
         let physical_mouse_moved = match (cur_pos, self.last_cursor_pos) {
@@ -1187,7 +1470,9 @@ impl Engine {
             || (gp.sThumbRY as i32).abs() > MOUSE_STICK_DEADZONE
             || physical_mouse_moved;
 
-        if dpad_moving {
+        if split || dpad_moving {
+            // Split mode always shows both cursors: the sticks never drive the
+            // pointer there, so they cannot mean "the user went back to the mouse".
             self.nav_grid_active = true;
         } else if mouse_moving {
             self.nav_grid_active = false;
@@ -1195,18 +1480,19 @@ impl Engine {
 
         let mut dx: i32 = 0;
         let mut dy: i32 = 0;
-        if b & B_DPAD_RIGHT != 0 {
+        if b & B_DPAD_RIGHT != 0 || (split && gp.sThumbLX > STICK_TH) {
             dx += 1;
         }
-        if b & B_DPAD_LEFT != 0 {
+        if b & B_DPAD_LEFT != 0 || (split && gp.sThumbLX < -STICK_TH) {
             dx -= 1;
         }
-        if b & B_DPAD_DOWN != 0 {
+        if b & B_DPAD_DOWN != 0 || (split && gp.sThumbLY < -STICK_TH) {
             dy += 1;
         }
-        if b & B_DPAD_UP != 0 {
+        if b & B_DPAD_UP != 0 || (split && gp.sThumbLY > STICK_TH) {
             dy -= 1;
         }
+        let (dx, dy) = (dx.clamp(-1, 1), dy.clamp(-1, 1));
 
         // Movement with first-step-immediate + hold-repeat.
         let moving = dx != 0 || dy != 0;
@@ -1232,7 +1518,6 @@ impl Engine {
         }
 
         // Right stick discrete movement (for Dual-Stick Split Keyboard mode).
-        const STICK_TH: i16 = 16000;
         let mut rdx: i32 = 0;
         let mut rdy: i32 = 0;
         if gp.sThumbRX > STICK_TH {
@@ -1281,7 +1566,7 @@ impl Engine {
                 }
                 // Two-way sync: if GUI or pointer interaction set grid_nav_active to false,
                 // and user is not actively pressing D-pad, sync Engine state to false!
-                if !nav.grid_nav_active && !dpad_moving {
+                if !nav.grid_nav_active && !dpad_moving && !split {
                     self.nav_grid_active = false;
                 }
                 nav.grid_nav_active = self.nav_grid_active;
@@ -1303,7 +1588,8 @@ impl Engine {
                 }
                 let now = crate::steady_seconds();
                 const TRIGGER_TH: u8 = 40;
-                let rt_held = gp.bRightTrigger > TRIGGER_TH;
+                // In split mode RT types the right-hand key, so it is not a modifier.
+                let rt_held = !split && gp.bRightTrigger > TRIGGER_TH;
 
                 // X button = Backspace (or Delete Whole Word if RT is held!)
                 if newly & B_X != 0 {
@@ -1383,19 +1669,30 @@ impl Engine {
                     self.nav_caret_right_next = 0.0;
                 }
 
-                // Analogue triggers:
-                // L2 (LT): Go to numbers and symbols list (?123 / #+=)
-                if gp.bLeftTrigger > TRIGGER_TH && self.nav_prev_left_trigger <= TRIGGER_TH {
-                    nav.layer += 1;
-                }
-                // R2 (RT): Capitalize letters (Shift / Caps toggle)
-                if gp.bRightTrigger > TRIGGER_TH && self.nav_prev_right_trigger <= TRIGGER_TH {
-                    nav.shift += 1;
+                // Analogue triggers. Normally L2 (LT) opens numbers and symbols
+                // and R2 (RT) is Shift; in split mode they type the key under the
+                // left and right cursor, like a Steam Deck.
+                let lt_edge = gp.bLeftTrigger > TRIGGER_TH && self.nav_prev_left_trigger <= TRIGGER_TH;
+                let rt_edge = gp.bRightTrigger > TRIGGER_TH && self.nav_prev_right_trigger <= TRIGGER_TH;
+                if split {
+                    if lt_edge {
+                        nav.select_left += 1;
+                    }
+                    if rt_edge {
+                        nav.select_right += 1;
+                    }
+                } else {
+                    if lt_edge {
+                        nav.layer += 1;
+                    }
+                    if rt_edge {
+                        nav.shift += 1;
+                    }
                 }
 
                 // Start types Enter, or Shift+Enter if RT (Shift trigger) is held!
                 if newly & B_START != 0 {
-                    if gp.bRightTrigger > TRIGGER_TH {
+                    if rt_held {
                         nav.shift_enter += 1;
                     } else {
                         nav.enter += 1;
@@ -1531,9 +1828,51 @@ impl Engine {
         true // Consume input and block mouse movement while in task switcher
     }
 
+    /// Release held input once when control stops (disabled, paused for a
+    /// fullscreen app, or disconnected) instead of on every frame.
+    fn quiesce(&mut self) {
+        if !self.quiesced {
+            self.release_all_if_needed();
+            self.quiesced = true;
+        }
+    }
+
+    /// Is desktop control paused because a fullscreen app has focus?
+    fn fullscreen_paused(&self) -> bool {
+        if !self.config.disable_in_fullscreen || !crate::platform::is_fullscreen_cached() {
+            return false;
+        }
+        match crate::platform::foreground_process_name_cached() {
+            Some(exe) => !self.config.is_fullscreen_exception(&exe),
+            None => true,
+        }
+    }
+
+    /// Warn once per connection when a wireless pad reaches Low or Empty.
+    fn check_low_battery(&mut self, idx: u32) {
+        let Some(b) = self.xinput.battery(idx) else {
+            return;
+        };
+        self.battery_cache = Some((b.BatteryType, b.BatteryLevel));
+        if !battery_has_level(b.BatteryType) {
+            self.battery_warned = false;
+            return;
+        }
+        if b.BatteryLevel > BATTERY_LEVEL_LOW {
+            // Charged again (or swapped batteries): warn again next time.
+            self.battery_warned = false;
+        } else if !self.battery_warned && self.config.low_battery_warning {
+            self.battery_warned = true;
+            crate::platform::log_debug(&format!("[engine] low battery on slot {idx}"));
+            crate::osd::show_battery(battery_desc(b.BatteryLevel), false);
+            self.rumble_pulse(9000, 9000, 0.25);
+        }
+    }
+
     fn release_all_if_needed(&mut self) {
-        self.xinput.stop_all_vibration();
-        self.rumble_until = 0.0;
+        // Motors are deliberately left alone: rumble ends through its own timer,
+        // and stopping it here would also cancel a game's rumble every frame
+        // while it runs fullscreen.
         // This also runs after a disconnect has already cleared was_connected.
         // Held input must be released regardless of the hardware flag.
         for e in &mut self.digital {
@@ -1556,6 +1895,11 @@ impl Engine {
         if self.drag_locked {
             mouse::button_up(crate::mouse::MouseButton::Left);
             self.drag_locked = false;
+        }
+        // A held in keyboard pointer mode presses the real left button.
+        if self.nav_mouse_down {
+            mouse::button_up(crate::mouse::MouseButton::Left);
+            self.nav_mouse_down = false;
         }
     }
 
@@ -1646,7 +1990,25 @@ fn on_pressed(
             key.up(crate::keys::Key::D);
             key.up(crate::keys::Key::LWin);
         }
-        Action::VoiceDictation => {}
+        Action::CursorNextMonitor => crate::platform::cursor_to_next_monitor(),
+        Action::CenterCursor => crate::platform::center_cursor_on_foreground(),
+        Action::DoubleClick => {
+            crate::platform::note_controller_left_click();
+            for _ in 0..2 {
+                mouse::button_down(mouse::MouseButton::Left);
+                mouse::button_up(mouse::MouseButton::Left);
+            }
+        }
+        // `Win+H`: Windows voice typing.
+        Action::VoiceDictation => tap_combo(key, &[crate::keys::Key::LWin, crate::keys::Key::H]),
+        Action::NextVirtualDesktop => tap_combo(
+            key,
+            &[crate::keys::Key::LWin, crate::keys::Key::LControl, crate::keys::Key::Right],
+        ),
+        Action::PrevVirtualDesktop => tap_combo(
+            key,
+            &[crate::keys::Key::LWin, crate::keys::Key::LControl, crate::keys::Key::Left],
+        ),
         Action::TaskView => {
             // `Win+Tab`: open Windows Task View
             key.down(crate::keys::Key::LWin);
@@ -1713,6 +2075,16 @@ fn on_pressed(
     }
 }
 
+/// Press `keys` in order and release them in reverse, as one shortcut.
+fn tap_combo(key: &mut KeyPresser, keys: &[crate::keys::Key]) {
+    for k in keys {
+        key.down(*k);
+    }
+    for k in keys.iter().rev() {
+        key.up(*k);
+    }
+}
+
 fn on_released(action: &Action, key: &mut KeyPresser, _xinput: &w32::XInputApi, _idx: u32) {
     match action {
         Action::Key { key: k, .. } => key.up(*k),
@@ -1772,6 +2144,169 @@ mod tests {
         engine.set_injected_gamepad(Some(pad));
         engine.update(0.024, 0.008);
         assert!(!engine.is_enabled());
+    }
+
+    #[test]
+    fn smart_pointer_slows_fine_aim_but_not_a_full_sweep() {
+        assert_eq!(target_slowdown(0.3, false), 0.0, "no target, no slowdown");
+        assert_eq!(target_slowdown(0.3, true), 1.0, "gentle aim over a link is slowed fully");
+        assert_eq!(target_slowdown(1.0, true), 0.0, "a full push sweeps past at full speed");
+        let mid = target_slowdown(0.8, true);
+        assert!(mid > 0.0 && mid < 1.0);
+        let mut last = 2.0;
+        for i in 0..=20 {
+            let v = target_slowdown(i as f32 / 20.0, true);
+            assert!(v <= last + 1e-6, "slowdown never grows with deflection");
+            last = v;
+        }
+    }
+
+    #[test]
+    fn smart_pointer_eases_in_instead_of_jumping() {
+        let after_one_frame = ease_toward(0.0, 1.0, 0.008);
+        assert!(after_one_frame > 0.0 && after_one_frame < 0.25, "{after_one_frame}");
+        let mut v = 0.0;
+        for _ in 0..40 {
+            v = ease_toward(v, 1.0, 0.008);
+        }
+        assert!(v > 0.95, "settles within a third of a second");
+        assert_eq!(ease_toward(0.5, 1.0, 1.0), 1.0, "a long frame never overshoots");
+    }
+
+    #[test]
+    fn releasing_input_lets_go_of_the_keyboard_pointer_click() {
+        let xinput = w32::XInputApi::load().expect("Windows XInput is available");
+        let mut engine = Engine::new(xinput, Config::default());
+        engine.nav_mouse_down = true;
+        engine.drag_locked = true;
+        engine.release_all_if_needed();
+        assert!(!engine.nav_mouse_down, "a disconnect while holding A must not leave the left button down");
+        assert!(!engine.drag_locked);
+    }
+
+    #[test]
+    fn releasing_the_scroll_stick_drops_the_leftover_tick() {
+        let xinput = w32::XInputApi::load().expect("Windows XInput is available");
+        let mut engine = Engine::new(xinput, Config::default());
+        engine.move_state.scroll_accum_y = 0.9;
+        engine.mouse_scroll((0.0, 0.0), 0.008, false);
+        assert_eq!(engine.move_state.scroll_accum_y, 0.0);
+    }
+
+    #[test]
+    fn status_snapshot_uses_cached_connection_and_battery() {
+        let xinput = w32::XInputApi::load().expect("Windows XInput is available");
+        let mut engine = Engine::new(xinput, Config::default());
+        engine.was_connected = true;
+        engine.battery_cache = Some((0x02, 0x01));
+        let status = engine.runtime_status();
+        assert!(status.connected);
+        assert_eq!(status.battery_level, Some(1));
+        engine.battery_cache = Some((0xFF, 0x00)); // unknown type: no level, not "empty"
+        assert_eq!(engine.runtime_status().battery_level, None);
+    }
+
+    #[test]
+    fn profile_cycling_wraps_in_both_directions() {
+        let stems: Vec<String> = ["Default", "Browser", "Games"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(step_profile(&stems, "Default", true), "Browser");
+        assert_eq!(step_profile(&stems, "games", true), "Default", "matching ignores case");
+        assert_eq!(step_profile(&stems, "Default", false), "Games");
+        assert_eq!(step_profile(&stems, "Deleted", true), "Default");
+        assert_eq!(step_profile(&[], "x", true), crate::profiles::DEFAULT_NAME);
+    }
+
+    #[test]
+    fn triggers_release_below_the_press_threshold() {
+        // Pressing needs the full threshold; holding survives a small dip.
+        assert!(!input_active(Input::LeftTrigger, 0, 25, 0, 30, false));
+        assert!(input_active(Input::LeftTrigger, 0, 30, 0, 30, false));
+        assert!(input_active(Input::LeftTrigger, 0, 25, 0, 30, true));
+        assert!(!input_active(Input::LeftTrigger, 0, 21, 0, 30, true));
+        // Buttons are digital and unaffected.
+        assert!(input_active(Input::A, B_A, 0, 0, 30, true));
+        assert!(!input_active(Input::A, 0, 0, 0, 30, true));
+    }
+
+    #[cfg(feature = "gui")] // the keyboard overlay only exists with the GUI
+    fn keyboard_engine(split: bool) -> (Engine, Arc<Mutex<VkNav>>) {
+        let xinput = w32::XInputApi::load().expect("Windows XInput is available");
+        let mut config = Config { disable_in_fullscreen: false, ..Config::default() };
+        config.controller.haptic_feedback = false;
+        let mut engine = Engine::new(xinput, config);
+        let nav = Arc::new(Mutex::new(VkNav { split_mode: split, ..Default::default() }));
+        engine.set_vk_nav(nav.clone());
+        engine.set_vk_handle(Arc::new(AtomicBool::new(true)));
+        (engine, nav)
+    }
+
+    #[cfg(feature = "gui")] // the keyboard overlay only exists with the GUI
+    #[test]
+    fn split_keyboard_types_with_the_triggers_instead_of_shift_and_symbols() {
+        let (mut engine, nav) = keyboard_engine(true);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD::default()));
+        engine.update(0.0, 0.008);
+        let pull = w32::XINPUT_GAMEPAD { bLeftTrigger: 200, bRightTrigger: 200, ..Default::default() };
+        engine.set_injected_gamepad(Some(pull));
+        engine.update(0.008, 0.008);
+        let fed = nav.lock().unwrap().drain();
+        assert_eq!((fed.select_left, fed.select_right), (1, 1));
+        assert_eq!((fed.layer, fed.shift), (0, 0));
+        assert!(fed.grid_nav_active, "split cursors are always shown");
+    }
+
+    #[cfg(feature = "gui")] // the keyboard overlay only exists with the GUI
+    #[test]
+    fn split_keyboard_moves_the_left_cursor_with_the_left_stick() {
+        let (mut engine, nav) = keyboard_engine(true);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD::default()));
+        engine.update(0.0, 0.008);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD { sThumbLX: 30000, ..Default::default() }));
+        engine.update(0.008, 0.008);
+        assert_eq!(nav.lock().unwrap().drain().dx, 1);
+    }
+
+    #[cfg(feature = "gui")] // the keyboard overlay only exists with the GUI
+    #[test]
+    fn normal_keyboard_keeps_triggers_as_symbols_and_shift() {
+        let (mut engine, nav) = keyboard_engine(false);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD::default()));
+        engine.update(0.0, 0.008);
+        let pull = w32::XINPUT_GAMEPAD { bLeftTrigger: 200, bRightTrigger: 200, ..Default::default() };
+        engine.set_injected_gamepad(Some(pull));
+        engine.update(0.008, 0.008);
+        let fed = nav.lock().unwrap().drain();
+        assert_eq!((fed.layer, fed.shift), (1, 1));
+        assert_eq!((fed.select_left, fed.select_right), (0, 0));
+    }
+
+    #[test]
+    fn disabled_engine_releases_once_and_then_stays_quiet() {
+        let xinput = w32::XInputApi::load().expect("Windows XInput is available");
+        let mut config = Config { enabled: false, ..Config::default() };
+        config.controller.haptic_feedback = false;
+        let mut engine = Engine::new(xinput, config);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD::default()));
+        engine.quiesced = false;
+        engine.update(0.0, 0.008);
+        assert!(engine.quiesced, "first disabled frame releases held input");
+        engine.digital[0].is_down = true; // would be cleared by a repeated release
+        engine.update(0.008, 0.008);
+        assert!(engine.digital[0].is_down, "later frames do not repeat the release");
+    }
+
+    #[test]
+    fn auto_profile_returns_to_the_users_choice() {
+        let xinput = w32::XInputApi::load().expect("Windows XInput is available");
+        let mut engine = Engine::new(xinput, Config { active_profile: "Mine".into(), ..Config::default() });
+        engine.set_auto_profile("Game", Vec::new());
+        assert_eq!(engine.config().active_profile, "Game");
+        assert!(engine.changed_base_profile().is_none(), "an auto switch is never saved");
+        engine.clear_auto_profile();
+        assert_eq!(engine.config().active_profile, "Mine");
+        assert_eq!(engine.config().bindings.len(), default_profile().len());
+        engine.set_profile("Other", Vec::new());
+        assert_eq!(engine.changed_base_profile().map(|(s, _)| s), Some("Other".into()));
     }
 
     #[test]

@@ -1,276 +1,230 @@
 <div align="center">
 
 # 🎮 Reverse Controller
-### *The Ultimate Native Rust Gamepad Navigation & Virtual Keyboard System*
+### *Your game controller as a complete mouse and keyboard for Windows — native Rust, Arabic and English*
 
 [![Rust](https://img.shields.io/badge/Rust-2021%20Edition-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![Release](https://img.shields.io/github/v/release/m7kor/Reverse-Controller?style=for-the-badge&color=2ea44f&logo=github)](https://github.com/m7kor/Reverse-Controller/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-131%20Passed-brightgreen?style=for-the-badge)](https://github.com/m7kor/Reverse-Controller)
-[![Clippy](https://img.shields.io/badge/Clippy-0%20Warnings-success?style=for-the-badge)](https://github.com/m7kor/Reverse-Controller)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
-<br/>
-
-**[English](README.md)** • **[🇸🇦 العربية (Arabic)](README.ar.md)** • **[📥 Download v1.2.3](https://github.com/m7kor/Reverse-Controller/releases/latest)** • **[📜 Changelog](CHANGELOG.md)** • **[📋 Audit Report](docs/comprehensive_audit_and_fix_report.md)**
-
----
+**[🇸🇦 العربية](README.ar.md)** • **English** • **[📥 Download](https://github.com/m7kor/Reverse-Controller/releases/latest)** • **[📜 Changelog](CHANGELOG.md)**
 
 </div>
 
 > [!TIP]
-> **Zero Steam Dependency · 100% Offline AI Voice Dictation · Sub-millisecond 125Hz Polling · Pure Native Rust**
->
-> For version release notes and update archives, visit the **[GitHub Releases Page](https://github.com/m7kor/Reverse-Controller/releases)** or consult the **[CHANGELOG.md](CHANGELOG.md)**.
+> **No Steam · No internet · No telemetry.** Settings and learned words stay on your PC.
 
 ---
 
-## ⚡ Quick Navigation
+## Contents
 
-| Section | Description |
+| Section | What you'll find |
 | :--- | :--- |
-| **[📖 About](#-about-the-project)** | Overview, philosophy, and performance metrics. |
-| **[📊 Comparison](#-technical-comparison)** | Reverse Controller vs commercial Controller Companion. |
-| **[🏛️ Architecture](#️-system-architecture)** | Core engine, GPU overlay, and Whisper AI pipeline. |
-| **[🎮 Controls Guide](#-complete-controller-mapping-guide)** | Desktop mouse, virtual keyboard, and system shortcuts. |
-| **[🎙️ Voice Dictation](#4️⃣-offline-ai-voice-dictation--natural-macros)** | Offline speech-to-text and voice punctuation macros. |
-| **[🚀 Getting Started](#-quick-start)** | Instant download and portable execution. |
-| **[🛠️ Building from Source](#️-building-from-source)** | Prerequisites and compilation instructions. |
+| [Install](#-install) | Download, install, uninstall |
+| [Overview](#-overview) | What it does and who it is for |
+| [Controller guide](#-controller-guide) | Every button in desktop, keyboard and shortcut modes |
+| [On-screen keyboard](#%EF%B8%8F-on-screen-keyboard) | Typing in Arabic and English with a controller |
+| [Settings](#%EF%B8%8F-settings) | The settings window, page by page |
+| [Profiles](#-profiles) | Button sets per app, switched automatically |
+| [Troubleshooting](#-troubleshooting) | The diagnostics report and common fixes |
+| [Building](#%EF%B8%8F-building-from-source) | Toolchain, tests and command-line options |
 
 ---
 
-## 📖 About The Project
+## 📥 Install
 
-**Reverse Controller** is a high-performance, open-source reimplementation of the classic **Controller Companion** desktop navigation utility, built from the ground up in safe, concurrent **Rust 2021**.
+1. Download `controller-companion.exe` from [Releases](https://github.com/m7kor/Reverse-Controller/releases/latest).
+2. Run it. It offers to install for your user — no administrator rights needed: it goes to `%LOCALAPPDATA%\Programs\Reverse Controller`, appears in the Start menu, and can be removed from **Settings → Apps → Installed apps**.
+3. Choose **No** to run it as a portable copy instead (you won't be asked again).
+4. On the first start, Settings opens on **Getting started**: a one-minute tutorial that ticks off each step as you do it on the controller.
 
-It seamlessly transforms any standard gamepad (Xbox Series / One / 360, PlayStation DualSense / DualShock 4, Nintendo Switch Pro, or generic XInput / DirectInput controllers) into an ultra-responsive desktop mouse and keyboard with sub-millisecond precision — without Steam, background bloat, or cloud dependencies.
-
-### 🌟 Key Highlights
-
-- ⚡ **Ultra-Lightweight & Blazing Fast:** Idles at **~24MB RAM** (vs 150MB+ for .NET / Electron utilities) with **<0.2% CPU** usage during 125Hz polling and **<1.2ms** input latency.
-- 🔒 **100% Offline & Private:** Zero cloud telemetry or external runtime dependencies. Local **OpenAI Whisper AI** provides speech-to-text directly on the CPU without Windows Voice Typing (Win+H).
-- 🖱️ **Hybrid Control:** Full support for physical mouse clicks on virtual keyboard buttons alongside instantaneous controller grid navigation.
-- 🎨 **Modern Fluent 2 Aesthetics:** GPU-accelerated translucent overlay rendered via `egui` with Windows 11 Acrylic / Mica glass effects, interactive visualizers, and tactile audio feedback.
-- 🌐 **First-Class Bilingual Typing:** Native Arabic (RTL, contextual reshaping, diacritics/tashkeel) and English QWERTY layouts with automatic text caret avoidance and caret navigation triggers.
-- 🛡️ **Tested & Verified:** 131 unit tests with 100% pass rate and 0 Clippy linter warnings.
+Running a newer download updates the installed copy. Command line: `--install`, `--uninstall [--quiet]`.
 
 ---
 
-## 📊 Technical Comparison
+## 📖 Overview
 
-| Feature | Original Controller Companion (Commercial) | Reverse Controller (Rust Edition) |
+**Reverse Controller** is an open-source, native Rust re-engineering of *Controller Companion* for Windows. It turns almost any game controller into a full replacement for the mouse and keyboard — no extra drivers:
+
+| Controller | How it connects | Notes |
 | :--- | :--- | :--- |
-| **Language & Architecture** | C# / .NET Framework 4.x | **Pure Native Rust 2021 (Zero Runtime)** |
-| **Steam Dependency** | Required (Must run via Steam client) | **None (Fully standalone, portable executable)** |
-| **Voice Dictation** | Relies on Windows Online Voice (Win+H) | **100% Local Whisper AI (CPU Inference, Zero Cloud)** |
-| **Arabic & RTL Support** | Broken / missing characters / reversed text | **Complete Bidirectional (BiDi) + Tashkeel + Reshaping** |
-| **Idle Memory (RAM)** | 85MB – 160MB | **24MB – 29MB (Periodic WorkingSet trimming)** |
-| **Input Latency** | ~8ms – 16ms | **< 1.2ms (125 Hz XInput engine)** |
-| **Emoji Browser** | Triggers Windows OS Flyout (Win + .) | **Lightweight Native Categorized Emoji Browser** |
-| **Keyboard Repositioning** | Clunky manual mouse dragging | **One-Touch R3 Analog Repositioning Across Screens** |
-| **Split-Stick Typing** | Not Supported | **Dual-Stick Steam Deck-Style Split Mode (L3+R3)** |
-| **Dedicated Shift+Enter** | Not Supported | **Dedicated `⇧↵` Key + `RT + Start` Gamepad Shortcut** |
-| **Mouse Interaction** | Limited / conflicts with overlay | **Full Physical Mouse & Touch Key Support** |
-| **Edit Tools Layer** | None | **Dedicated layer for Copy, Paste, Cut, Undo, Select All** |
-| **Source Code & License** | Proprietary Commercial | **100% Free & Open Source (MIT License)** |
+| Xbox Series / One / 360 and Xbox-mode pads | XInput | Vibration and battery level |
+| PlayStation 5 — DualSense, DualSense Edge | Windows joystick API | Analog triggers, PS button = Guide |
+| PlayStation 4 — DualShock 4 | Windows joystick API | Analog triggers, PS button = Guide |
+| Nintendo Switch Pro | Windows joystick API | Buttons by position (bottom = A) |
+| Other USB / Bluetooth gamepads | Windows joystick API | Standard DirectInput layout |
+
+Buttons are mapped by position, so every binding works the same on every pad. When several are connected, an Xbox-type pad is used first.
+
+What it does:
+
+- 🖱️ **Pointer and scrolling** with dead zones, acceleration, a sustained-push cruise curve, LT *sniper* slow-down, optional AltSnap precision, and a **smart pointer** that eases off over links and buttons so small targets are easy to hit (a full push still sweeps past at full speed).
+- ⌨️ **On-screen keyboard** for Arabic and English: D-pad or pointer typing, a split two-stick mode, word suggestions that learn your words, and an editing panel.
+- 🪟 **Window and desktop control**: snap, maximise, minimise, close, task switcher assist, virtual desktops, window dragging with the right stick, radial quick menu.
+- 📚 **A library of 80+ shortcuts** you can put on any button: browser tabs, copy/paste/save/find, screenshot, emoji panel, clipboard history, Run, Search, File Explorer, lock, Task Manager, magnifier, cursor-to-next-monitor and more.
+- 🎮 **Games keep their controller**: desktop control pauses automatically in fullscreen games (browsers and video players stay controllable) and never touches the game's rumble.
+- 🌐 **Bilingual app**: the whole settings window is available in English and Arabic (right-to-left), selectable at any time.
 
 ---
 
-## 🏛️ System Architecture
+## 🎮 Controller guide
 
-```mermaid
-flowchart TB
-    subgraph Hardware ["🎮 Input Hardware"]
-        pad["Gamepad (Xbox / PlayStation / Generic XInput)"]
-        mic["Microphone (USB / Headset Audio)"]
-    end
+### 1. Desktop mode (default buttons)
 
-    subgraph CoreEngine ["⚙️ 125 Hz Real-Time Core Engine"]
-        poll["XInput / DirectInput Polling"]
-        deadzone["Dual Deadzone & Kinetic Acceleration"]
-        bindings["Binding Dispatcher & Modifier Layer"]
-        altsnap["AltSnap Window Mover & Sizer"]
-    end
-
-    subgraph UI_Overlays ["🖥️ GPU-Accelerated Overlays (egui)"]
-        osk["Floating Virtual Keyboard (OSK)"]
-        split["Dual-Stick Split Typing Mode"]
-        radial["8-Direction Radial Pie Menu"]
-        emoji["Built-in Native Emoji Browser"]
-        hud["Minimalist HUD / OSD Overlay"]
-        gui["Modern Settings & Calibration Panel"]
-    end
-
-    subgraph LocalAI ["🎙️ Local Speech-to-Text Pipeline"]
-        cpal["Raw Audio Capture (CPAL)"]
-        vad["Voice Activity Detection (VAD)"]
-        agc["DC-Filter & Soft AGC Normalizer"]
-        whisper["OpenAI Whisper Model (whisper-rs CPU)"]
-        injector["Unicode Keystroke & Macro Injector"]
-    end
-
-    pad --> poll --> deadzone --> bindings
-    bindings --> altsnap
-    bindings --> osk
-    bindings --> radial
-    mic --> cpal --> vad --> agc --> whisper --> injector
-    osk --> emoji
-    osk --> split
-```
-
----
-
-## 🎮 Complete Controller Mapping Guide
-
-### 1️⃣ Desktop Mouse Mode (Default)
-
-Active during everyday desktop browsing, file management, and media playback:
-
-| Controller Button | Action | Description |
-| :--- | :--- | :--- |
-| **🕹️ Left Stick** | **Mouse Pointer Move** | Kinetic analog motion with deadzone dampening and acceleration. |
-| **🕹️ Right Stick** | **Mouse Scroll Wheel** | Ultra-smooth vertical and horizontal scrolling across documents and web pages. |
-| **🟢 Button A** | **Left Click** | Primary click, double-click, window drag, and link selection. |
-| **🔵 Button X** | **Right Click** | Context menu and secondary commands. |
-| **🔴 Button B** | **Backspace** | Deletes the previous character or navigates backward in browser history. |
-| **🟡 Button Y** | **Play / Pause Media** | Instant playback toggle for Spotify, YouTube, VLC, and media players. |
-| **🔘 R3 (Right Stick Click)** | **Middle Click** | Closes browser tabs in one click or activates auto-scroll. |
-| **🔘 L3 (Left Stick Click)** | **Toggle Keyboard (OSK)** | Summons or dismisses the floating on-screen keyboard. |
-| **🎯 Left Trigger (LT)** | **Sniper Precision Mode** | Squeezing LT slows mouse speed by up to 70% for sub-pixel precision. |
-| **⚡ Right Trigger (RT)** | **Shift Modifier** | Acts as `Shift` key for multi-item selection and text highlighting. |
-| **⏮️ Left Shoulder (LB)** | **Previous Track** | Skips to previous media track. |
-| **⏭️ Right Shoulder (RB)** | **Next Track** | Skips to next media track. |
-| **🎛️ D-Pad (Arrows)** | **Arrow Keys** | Discrete cursor navigation with auto-repeat on hold. |
-| **▶️ Start Button** | **Enter Key** | Submits dialogs, launches selected shortcuts, or inserts newlines. |
-| **📋 Back Button** | **Modifier Layer** | Hold down to activate the secondary system shortcuts layer. |
-| **🌐 Xbox Guide Button** | **Start Menu / Turn Off** | Tap opens the Windows Start Menu; holding for 2.5s powers off wireless gamepads. |
-
----
-
-### 2️⃣ Virtual Keyboard Mode (Press L3 to Open)
-
-Pressing **L3** surfaces the floating keyboard overlay, repurposing your controller into an optimized typing apparatus:
-
-| Controller Input | Custom Keyboard Action |
+| Button | Action |
 | :--- | :--- |
-| **🕹️ Left Stick or D-Pad** | **Navigate Grid Cursor** smoothly across keys in all 8 directions. |
-| **🟢 Button A** | **Type Character / Select Key** with tactile mechanical audio feedback. |
-| **🔵 Button X** | **Backspace** with accelerating deletion speed on sustained hold. |
-| **🟡 Button Y** | **Spacebar** with continuous spacing on hold. |
-| **🔴 Button B** | **Dismiss Keyboard** and return directly to desktop mode. |
-| **⏮️ Left Bumper L1 (LB)** | **Move Caret Right (→)** across text fields for fast typo navigation. |
-| **⏭️ Right Bumper R1 (RB)** | **Move Caret Left (←)** across text fields with continuous auto-repeat. |
-| **🎯 Left Trigger L2 (LT)** | **Switch to Numbers & Symbols Layer** (`?123` / `#+=`). |
-| **⚡ Right Trigger R2 (RT)** | **Capitalize / Shift / Diacritics** (Tashkeel in Arabic, uppercase in English). |
-| **🔘 R3 (Right Stick Click)** | **Reposition Mode:** Click R3 to activate, freely move the keyboard with the Right Stick anywhere on screen, and click R3 again to lock! |
-| **🔘 L3 (Left Stick Click)** | **Dismiss Keyboard** immediately. |
-| **🎮 L3 + R3 Together** | **Toggle Dual-Stick Split Mode:** Splits the keyboard into two halves for simultaneous two-thumb typing (Steam Deck layout). |
-| **📋 Back Button** | **Toggle Language** instantly between Arabic and English (`AR ⇋ EN`). |
-| **▶️ Start Button** | **Enter / Submit** (Standard Enter key). |
-| **⚡ RT + Start** | **Shift + Enter:** Inserts newlines in Discord, WhatsApp, Telegram, ChatGPT without sending! |
-| **⇧↵ Button on Keyboard** | **Dedicated Shift+Enter Key:** Placed on the bottom row next to period for direct newline injection via controller or mouse click. |
-| **🛠️ Edit Button on Keyboard** | **Open Edit Tools Layer:** Copy, Paste, Cut, Undo, Redo, Select All, and Clear Word. |
-| **😀 Emoji Button on Keyboard** | **Open Native Emoji Browser:** Categorized offline emoji picker. |
+| **Left stick** | Move the pointer |
+| **Right stick** | Scroll (vertical and horizontal) |
+| **A** | Left click (hold to drag) |
+| **X** | Right click |
+| **B** | Backspace |
+| **Y** | Play / pause media |
+| **D-pad** | Arrow keys (repeat while held) |
+| **LB / RB** | Previous / next track |
+| **LT** | Ctrl — squeezing it also slows the pointer (sniper mode) |
+| **RT** | Shift — e.g. RT + D-pad selects text |
+| **L3** | Open / close the on-screen keyboard |
+| **R3** | Middle click |
+| **Start** | Enter |
+| **Back** | Hold for the second layer (below) |
+| **Guide** | Start menu · hold 2.5 s to turn a wireless controller off |
+
+Every button can be changed on the **Buttons** page of Settings.
+
+### 2. Second layer (hold Back)
+
+| Combination | Action |
+| :--- | :--- |
+| **Back + Start** | Turn desktop control on/off (always works, even while off) |
+| **Back + B** | Escape |
+| **Back + X** | Minimise all windows (Win+M) |
+| **Back + D-pad ← / →** | Snap window left / right |
+| **Back + D-pad ↑ / ↓** | Volume up / down (with on-screen meter) |
+| **Back + LB** | Mute |
+| **Back + RB** or **Back + RT** | Window switcher (Ctrl+Alt+Tab) |
+| **Back + LT** | Previous track |
+| **Back + L3** | Drag-lock (keeps the left button held) |
+| **Back + R3** | Radial quick menu |
+| **Back + right stick** | Move the window under the pointer |
+| **Back + A / Back + Y** | Display: external only / PC screen only |
+| **Back + Guide** | Turn the controller off |
+
+Add a second-layer shortcut to any free button from the Buttons page.
+
+### 3. Task switcher assist
+
+While Alt+Tab or Task View is open: **D-pad / left stick / LB / RB** move between windows, **A** opens, **B** cancels, **X** closes the highlighted window.
+
+### 4. Radial quick menu (Back + R3)
+
+Steer with the left stick, press **A** (or click): Keyboard · Volume up · Task View · Volume down · Desktop · Paste · Close app · Screenshot. The centre cancels.
 
 ---
 
-### 3️⃣ Secondary System Shortcuts (Back Modifier Layer: Hold Back Button)
+## ⌨️ On-screen keyboard
 
-Holding the **Back button** turns your controller into a full Windows command center:
+Opens with **L3**, from the tray, or automatically when you click a text box with **A**. It opens on the monitor you are working on, at the size and edge you chose, and remembers where you moved it.
 
-| Combination | Action | Description |
-| :--- | :--- | :--- |
-| **Back + Start** | **Toggle Desktop Control** | Hardware-level killswitch to enable or disable gamepad input at any time. |
-| **Back + LB (Left Bumper)** | **AI Voice Dictation** | Starts local Whisper AI voice typing (offline, privacy-preserving). |
-| **Back + R3 (Right Stick)** | **Radial Pie Menu** | Opens the 8-directional radial menu for fast application switching. |
-| **Back + L3 (Left Stick)** | **Drag Lock** | Toggles persistent mouse left-click hold for effortless window dragging. |
-| **Back + D-Pad ⬆️ / ⬇️** | **Volume Control** | Adjusts system volume up/down with on-screen OSD HUD and tick audio. |
-| **Back + D-Pad ⬅️ / ➡️** | **Snap Window Left / Right** | Snaps the active window to screen halves (Win + Left / Right). |
-| **Back + 🔴 Button B** | **Escape (Esc)** | Closes modals, context menus, or exits fullscreen. |
-| **Back + 🔵 Button X** | **Show Desktop** | Minimizes all open windows immediately (Win + D). |
-| **Back + RB (Right Bumper)** | **Task Switcher (Alt + Tab)** | Surfaces the Windows task switcher with haptic feedback. |
+| Button | While the keyboard is open |
+| :--- | :--- |
+| **D-pad** | Move between keys (**A** presses the highlighted key) |
+| **Left stick + A** | Point at any key and click it |
+| **Up from the top row** | Quick actions and word suggestions |
+| **X / Y** | Backspace / Space (repeat while held) |
+| **RT + X / RT + Y** | Delete word / accept the top suggestion |
+| **LB / RB** | Move the text cursor left / right |
+| **LT** | Numbers and symbols |
+| **RT** | Shift (double-tap the Shift key for caps lock) |
+| **Start / RT + Start** | Enter / new line without sending (Shift+Enter) |
+| **Back** | Switch language (EN ⇄ ع) |
+| **R3** | Move mode: place the keyboard with the right stick, R3 again to lock |
+| **L3 + R3** | Split mode: each stick moves its own cursor, **LT/RT** type the left/right key |
+| **B / L3** | Close |
 
----
+**Typing aids**
 
-### 4️⃣ Offline AI Voice Dictation & Natural Macros
-
-Reverse Controller features an embedded, offline speech-to-text pipeline powered by **OpenAI Whisper** running entirely on the CPU:
-
-- **Automatic Send Macro:** Say **"send"**, **"Send"**, or **"ارسل"** / **"إرسال"** / **"انتر"** at the end of your sentence to automatically type the text and hit Enter!
-- **Spoken Newlines:** Say **"new line"**, **"newline"**, or **"سطر جديد"** to cleanly break to the next paragraph.
-- **Natural Punctuation Commands:**
-  - *"comma"* / *"فاصلة"* ⇦ `,` / `،`
-  - *"semicolon"* / *"فاصلة منقوطة"* ⇦ `;` / `؛`
-  - *"period"* / *"نقطة"* ⇦ `.`
-  - *"colon"* / *"نقطتان"* ⇦ `:`
-  - *"question mark"* / *"علامة استفهام"* ⇦ `?` / `؟`
-  - *"exclamation mark"* / *"علامة تعجب"* ⇦ `!`
-  - *"parentheses"* / *"بين قوسين"* ⇦ `()`
-  - *"dash"* / *"شرطة"* ⇦ `-`
-  - *"slash"* / *"خط مائل"* ⇦ `/`
-- **Custom Vocabulary Biasing:** Add your custom names, gamer tags, or technical slang (e.g., *"Discord"*, *"Fortnite"*, *"Rust"*, *"FIFA"*) in the **Voice & AI** settings tab to prime Whisper's token priors for 100% recognition accuracy.
+- **Arabic layout** follows the Windows Arabic (101) keyboard, including Shift diacritics and the lam-alef keys (لا · لأ · لإ · لآ) sent as real letters.
+- **English layout** mirrors whatever Windows layout is active (QWERTZ, AZERTY …).
+- **✂ Edit panel**: copy, paste, cut, select all, undo, redo, delete word, Home/End, arrows.
+- **Toolbar**: live preview, three suggestions, copy, paste, new line.
+- **Word learning**: words you type twice become suggestions. Stored only in `learned_words.json` next to your settings; turn it off or clear it on the Keyboard page.
 
 ---
 
-## 🚀 Quick Start
+## ⚙️ Settings
 
-Reverse Controller is completely portable and requires zero installation:
+Left-click the tray icon (or run `controller-companion.exe --settings`). The window has a page per topic and works fully in **English or العربية** — switch from the sidebar or the General page.
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  🚀 Direct Executable: ReverseController.exe (8.4 MB - Ready to Run)   │
-│  📦 Portable Package:  ReverseController-v1.2.3-windows-x64.zip (3.3 MB)│
-│  👉 https://github.com/m7kor/Reverse-Controller/releases/latest         │
-└────────────────────────────────────────────────────────────────────────┘
-```
+| Page | Highlights |
+| :--- | :--- |
+| **Home** | Live status, profile, battery, conflict warnings, and what every button does right now |
+| **Pointer** | Presets (Precision / Balanced / Large display / Fast), speed, acceleration, sniper, AltSnap, stick curve, scrolling |
+| **Getting started** | A guided tutorial: move, click, scroll, aim, type, quick menu — each step ticks off when you do it |
+| **Controller** | Supported controllers, live button/trigger/stick monitor, **button-mapping wizard** for any non-Xbox pad, 4-second drift calibration, dead zones, trigger press point, vibration, low-battery warning |
+| **Keyboard** | Position, size, remembered spot, caret avoidance, auto-open, split by default, sound effects, word learning |
+| **Buttons** | Shortcut library for every button, stick roles with a one-click left-handed swap, add/remove second-layer shortcuts |
+| **Profiles** | Activate, duplicate, delete (with confirmation), create from current buttons with program rules, import `.amgp` |
+| **General** | Language, start with Windows, install/uninstall, fullscreen pause and its exception list, notifications, keyboard toggle shortcut, tutorial, diagnostics |
 
-1. **Download:** Grab the latest portable package from **[GitHub Releases](https://github.com/m7kor/Reverse-Controller/releases/latest)**.
-2. **Extract:** Unzip to any folder of your choice.
-3. **Launch:** Run `ReverseController.exe` (no admin rights or external runtimes required).
-4. **Enjoy:** Connect any Xbox, PlayStation, or generic gamepad.
-5. **System Tray Integration:**
-   - **Left-Click Tray Icon:** Opens the comprehensive Settings Panel (Pointer curves, Deadzones, Keyboard prefs, Voice & AI calibration, Profiles).
-   - **Right-Click Tray Icon:** Opens the Quick Menu to toggle control on/off, restart, or quit.
+Edits are saved with **Save changes** (or Ctrl+S); closing with unsaved changes asks first. The background app picks up saved changes immediately, including a new toggle shortcut.
+
+The **tray icon** is a gamepad that changes colour with the state (active, paused for a game, off, no controller); its tooltip shows the mode, profile and battery.
 
 ---
 
-## 🛠️ Building From Source
+## 🗂 Profiles
 
-### Prerequisites:
-- Windows 10 or Windows 11 (x64)
-- [Rust Toolchain (MSVC Stable)](https://rustup.rs/)
-- Visual Studio C++ Build Tools with CMake and LLVM/libclang (required for compiling Whisper CPU inference bindings).
+A profile is a saved set of buttons. Give it program names (e.g. `vlc.exe, chrome.exe`) and it takes over while one of those programs is focused, then hands back to the profile you chose — automatic switches are never saved over your own choice. Profiles live in `%APPDATA%\ControllerCompanionRust\profiles`. AntiMicroX `.amgp` files can be imported from Settings or with `--convert`.
+
+---
+
+## 🩺 Troubleshooting
+
+Run **Diagnostics report** from the tray menu or Settings → General (or `controller-companion.exe --doctor`). It checks the settings file, button conflicts, every profile, XInput and connected controllers, administrator rights, monitors and whether a fullscreen pause is active, then saves `diagnostics.txt` next to your settings.
+
+| Symptom | Fix |
+| :--- | :--- |
+| Nothing moves | Press **Back + Start**; check the tray tooltip and the report |
+| Paused in a browser or player | Add the program on General → *Keep control in these fullscreen programs* |
+| Pointer drifts | Controller page → *Measure stick drift* → use the suggestion → Save |
+| Can't click an admin window | Tray → *Restart as Administrator* |
+
+---
+
+## 🛠️ Building from source
+
+Requirements: Windows 10/11 x64 and the [Rust MSVC toolchain](https://rustup.rs/).
 
 ```powershell
-# Clone the repository
 git clone https://github.com/m7kor/Reverse-Controller.git
 cd Reverse-Controller
-
-# Build the release binary with Link-Time Optimization (LTO)
-cargo build --release --features "gui,voice"
-
-# Run the test suite (131 tests)
-cargo test --features "gui,voice"
-
-# Run strict Clippy lint verification (Zero Warnings)
-cargo clippy --all-targets --features "gui,voice" -- -D warnings
+cargo build --release                 # target\release\controller-companion.exe
+powershell -File scripts\check.ps1    # tests + strict Clippy, GUI and headless builds
 ```
 
-The optimized production binary will be generated at:
-`target/release/ReverseController.exe`
+`cargo build --no-default-features` builds a headless engine without the GUI.
 
----
+**Command-line options**
 
-## ⚙️ Configuration & Profiles
+| Option | Purpose |
+| :--- | :--- |
+| `--settings` | Open the settings window |
+| `--config <path>` | Use another settings file |
+| `--doctor` | Write the diagnostics report |
+| `--status` | Print controller slots and battery |
+| `--validate-config` | Check a settings file without starting |
+| `--write-default` / `--print-default` | Write or print the default settings |
+| `--convert <in.amgp> [out.json]` | Convert an AntiMicroX profile |
+| `--no-elevate` | Don't ask for administrator rights at start |
+| `--trace-pad`, `--inject-pad lx,ly,rx,ry[,buttons]` | Input diagnostics without/with a controller |
 
-All settings, mouse curves, analog deadzones, and custom vocabulary are persisted in standard JSON format at:
-`%APPDATA%\ControllerCompanionRust\config.json`
+The app asks for administrator rights at start (so it can control elevated windows); use `--no-elevate` to skip.
 
-### AntiMicroX Compatibility:
-Reverse Controller natively supports importing `.amgp` profile files directly through the Settings UI with automatic XML/JSON schema translation.
+Settings: `%APPDATA%\ControllerCompanionRust\config.json` · Debug log: `debug.log` in the same folder (rotated at 1 MB).
 
 ---
 
 ## 📜 License
 
-This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for complete details.
+MIT — see [LICENSE](LICENSE).
