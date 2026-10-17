@@ -1260,12 +1260,19 @@ impl Engine {
                     self.nav_mouse_down = false;
                 }
                 let now = crate::steady_seconds();
-                // X button = Backspace with continuous hold-to-repeat (just like a physical keyboard!)
+                const TRIGGER_TH: u8 = 60;
+                let rt_held = gp.bRightTrigger > TRIGGER_TH;
+
+                // X button = Backspace (or Delete Whole Word if RT is held!)
                 if newly & B_X != 0 {
-                    nav.backspace += 1;
-                    self.nav_backspace_down = now;
-                    self.nav_backspace_next = now + 0.40;
-                } else if b & B_X != 0 {
+                    if rt_held {
+                        nav.delete_word += 1;
+                    } else {
+                        nav.backspace += 1;
+                        self.nav_backspace_down = now;
+                        self.nav_backspace_next = now + 0.40;
+                    }
+                } else if b & B_X != 0 && !rt_held {
                     if self.nav_backspace_down > 0.0 && now >= self.nav_backspace_next {
                         nav.backspace += 1;
                         self.nav_backspace_next = now + 0.065; // ~15 chars per sec clean deletion
@@ -1275,12 +1282,16 @@ impl Engine {
                     self.nav_backspace_next = 0.0;
                 }
 
-                // Y button = Space with hold-to-repeat
+                // Y button = Space (or Accept Top Prediction if RT is held!)
                 if newly & B_Y != 0 {
-                    nav.space += 1;
-                    self.nav_space_down = now;
-                    self.nav_space_next = now + 0.40;
-                } else if b & B_Y != 0 {
+                    if rt_held {
+                        nav.accept_prediction += 1;
+                    } else {
+                        nav.space += 1;
+                        self.nav_space_down = now;
+                        self.nav_space_next = now + 0.40;
+                    }
+                } else if b & B_Y != 0 && !rt_held {
                     if self.nav_space_down > 0.0 && now >= self.nav_space_next {
                         nav.space += 1;
                         self.nav_space_next = now + 0.080;
@@ -1332,7 +1343,6 @@ impl Engine {
 
                 // Analogue triggers:
                 // L2 (LT): Go to numbers and symbols list (?123 / #+=)
-                const TRIGGER_TH: u8 = 60;
                 if gp.bLeftTrigger > TRIGGER_TH && self.nav_prev_left_trigger <= TRIGGER_TH {
                     nav.layer += 1;
                 }

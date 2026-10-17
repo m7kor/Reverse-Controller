@@ -19,8 +19,12 @@ pub struct VkNav {
     pub select: u32,
     /// Number of backspace presses (X).
     pub backspace: u32,
+    /// Number of delete-word presses (RT + X).
+    pub delete_word: u32,
     /// Number of space presses (Y).
     pub space: u32,
+    /// Number of accept-prediction presses (RT + Y).
+    pub accept_prediction: u32,
     /// Number of close requests (B / O, the ✕ button, or Back).
     pub close: u32,
     /// Move text cursor left in text field (L1 / LB).
@@ -139,5 +143,19 @@ mod tests {
         nav.clear_close_and_hide();
         assert_eq!(nav.close, 0);
         assert_eq!(nav.hide, 0);
+    }
+
+    #[test]
+    fn test_ergonomic_shortcuts_drain_properly() {
+        let mut nav = VkNav {
+            delete_word: 2,
+            accept_prediction: 1,
+            ..Default::default()
+        };
+        let drained = nav.drain();
+        assert_eq!(drained.delete_word, 2);
+        assert_eq!(drained.accept_prediction, 1);
+        assert_eq!(nav.delete_word, 0);
+        assert_eq!(nav.accept_prediction, 0);
     }
 }

@@ -96,7 +96,7 @@ pub fn default_profile() -> Vec<PadBindingDef> {
         dm(I::Y, back, A::DisplaySwitch(DisplayMode::Internal)),
         dm(I::X, back, A::Combo(vec![Key::LWin, Key::M])),
         dm(I::RightShoulder, back, A::Combo(vec![Key::LControl, Key::LMenu, Key::Tab])),
-        dm(I::LeftShoulder, back, A::VoiceDictation),
+        dm(I::LeftShoulder, back, A::Key { key: Key::VolumeMute, repeat: false }),
         dm(I::Start, back, A::ToggleEnabled),
         dm(I::LeftThumb, back, A::ToggleDragLock),
         dm(I::RightStick, back, A::WindowDrag),
