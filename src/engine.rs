@@ -1594,19 +1594,7 @@ fn on_pressed(
             key.up(crate::keys::Key::D);
             key.up(crate::keys::Key::LWin);
         }
-        Action::VoiceDictation => {
-            #[cfg(feature = "voice")]
-            {
-                let is_ar = crate::platform::active_input_language()
-                    .map(|l| l == crate::vkeyboard::Lang::Ar)
-                    .unwrap_or(true);
-                crate::voice::toggle_voice_typing(is_ar);
-            }
-            #[cfg(not(feature = "voice"))]
-            {
-                crate::platform::log_debug("[engine] Voice dictation triggered, but voice feature not compiled");
-            }
-        }
+        Action::VoiceDictation => {}
         Action::TaskView => {
             // `Win+Tab`: open Windows Task View
             key.down(crate::keys::Key::LWin);

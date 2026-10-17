@@ -33,8 +33,6 @@ mod tray;
 mod vknav;
 #[cfg(feature = "gui")]
 mod vkeyboard;
-#[cfg(feature = "voice")]
-pub mod voice;
 mod win32;
 
 use config::{default_config_path, Config};
@@ -338,8 +336,6 @@ fn main() {
         config.controller.right_stick_dead_zone,
         config.enabled
     );
-    #[cfg(feature = "voice")]
-    crate::voice::set_voice_settings(config.voice.clone());
 
     if elevated && config.autostart {
         if let Ok(exe) = std::env::current_exe() {
@@ -373,10 +369,6 @@ fn main() {
     osd::spawn();
     osd::set_osd_enabled(config.osd_enabled);
     sound::set_sfx_enabled(config.keyboard.mechanical_sfx);
-
-    // Voice model is lazily loaded on first dictation and automatically unloaded on idle
-    #[cfg(feature = "voice")]
-    crate::platform::log_debug("[main] Voice feature active: lazy loading on-demand with auto-unload");
 
     let mut engine = Engine::new(xinput, config);
     engine.set_trace_pad(trace_pad);
@@ -615,16 +607,12 @@ fn main() {
         let mut last_mod = std::fs::metadata(&watch_path).and_then(|m| m.modified()).ok();
         while watch_running.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(400));
-            #[cfg(feature = "voice")]
-            crate::voice::check_idle_unload();
             if let Ok(m) = std::fs::metadata(&watch_path).and_then(|m| m.modified()) {
                 if Some(m) != last_mod {
                     if let Ok(mut e) = watch_engine.lock() {
                         match e.reload_from_disk(&watch_path) {
                             Ok(()) => {
                                 last_mod = Some(m);
-                                #[cfg(feature = "voice")]
-                                crate::voice::set_voice_settings(e.config().voice.clone());
                                 println!("[main] reloaded updated config from {}", watch_path.display());
                             }
                             Err(error) => eprintln!("[main] config reload deferred: {error}"),

@@ -1070,6 +1070,26 @@ pub fn active_input_language() -> Option<crate::vkeyboard::Lang> {
     }
 }
 
+/// Query the currently active Windows keyboard layout handle (HKL) for the foreground window or current thread.
+#[cfg(feature = "gui")]
+pub fn active_input_hkl() -> usize {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if !hwnd.is_null() {
+            let mut pid: DWORD = 0;
+            let tid = GetWindowThreadProcessId(hwnd, &mut pid);
+            if tid != 0 {
+                let hkl = GetKeyboardLayout(tid);
+                if hkl != 0 {
+                    return hkl;
+                }
+            }
+        }
+        GetKeyboardLayout(0)
+    }
+}
+
+
 /// The child control that had keyboard focus, so it can be restored exactly.
 static FOREGROUND_FOCUS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 

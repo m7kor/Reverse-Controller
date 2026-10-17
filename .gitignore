@@ -6,3 +6,5 @@
 *.err
 .vscode/
 .idea/
+*.exe
+

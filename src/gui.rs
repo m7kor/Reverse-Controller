@@ -386,7 +386,6 @@ enum SettingsPage {
     Keyboard,
     Profiles,
     Bindings,
-    Voice,
 }
 
 struct SettingsApp {
@@ -410,7 +409,6 @@ struct SettingsApp {
     runtime_status: Option<crate::runtime_status::RuntimeStatus>,
     last_status_check: Instant,
     last_status_seen: Instant,
-    custom_vocab_input: String,
     lang: GuiLang,
     frame_count: u32,
 }
@@ -428,9 +426,14 @@ impl SettingsApp {
         } else {
             working.active_profile.clone()
         };
-        let custom_vocab_input = working.voice.custom_vocabulary.join(", ");
         let lang = if working.gui_language.eq_ignore_ascii_case("ar") {
             GuiLang::Ar
+        } else if working.gui_language.eq_ignore_ascii_case("auto") {
+            if crate::win32::user_ui_primary_language() == 0x01 {
+                GuiLang::Ar
+            } else {
+                GuiLang::En
+            }
         } else {
             GuiLang::En
         };
@@ -452,7 +455,6 @@ impl SettingsApp {
             runtime_status: None,
             last_status_check: Instant::now() - Duration::from_secs(1),
             last_status_seen: Instant::now() - Duration::from_secs(10),
-            custom_vocab_input,
             lang,
             frame_count: 0,
         }
@@ -562,8 +564,6 @@ impl SettingsApp {
                     &format!("{}: {}", ar("تم الحفظ بنجاح في"), self.config_path.display()),
                     self.lang,
                 );
-                #[cfg(feature = "voice")]
-                crate::voice::set_voice_settings(self.working.voice.clone());
                 true
             }
             Err(e) => {
@@ -815,7 +815,6 @@ impl eframe::App for SettingsApp {
                             } else {
                                 self.working.active_profile.clone()
                             };
-                            self.custom_vocab_input = self.working.voice.custom_vocabulary.join(", ");
                             if let Ok(mut engine) = self.engine.lock() {
                                 engine.apply_config(self.working.clone());
                             }
@@ -828,7 +827,6 @@ impl eframe::App for SettingsApp {
                     self.working = Config::default();
                     self.lang = GuiLang::En;
                     self.active_profile = crate::profiles::DEFAULT_NAME.to_string();
-                    self.custom_vocab_input = self.working.voice.custom_vocabulary.join(", ");
                     self.status = t("Defaults are ready. Save to apply them.", "تم استرجاع الإعدادات الافتراضية. اضغط حفظ للتطبيق.", self.lang);
                 }
                 if ui.button(t("Close", "إغلاق", self.lang)).clicked() {
@@ -854,7 +852,6 @@ impl eframe::App for SettingsApp {
                     (SettingsPage::Keyboard, t("Keyboard", "لوحة المفاتيح", self.lang)),
                     (SettingsPage::Profiles, t("Profiles", "البروفايلات", self.lang)),
                     (SettingsPage::Bindings, t("Bindings", "تعيينات الأزرار", self.lang)),
-                    (SettingsPage::Voice, t("Voice & AI", "الصوت والذكاء الاصطناعي", self.lang)),
                 ] {
                     ui.selectable_value(&mut self.page, page, title);
                 }
@@ -1471,160 +1468,6 @@ impl eframe::App for SettingsApp {
 
                 }
 
-                if self.page == SettingsPage::Voice {
-                    ui.label(egui::RichText::new(t("Offline Voice AI & Speech-to-Text", "الكتابة الصوتية والذكاء الاصطناعي المحلي", self.lang)).strong());
-                    ui.label(t(
-                        "Speech-to-Text powered locally by OpenAI Whisper. 100% private, runs entirely on CPU without internet.",
-                        "تحويل الصوت إلى نص محلياً عبر OpenAI Whisper. خصوصية 100%، يعمل على المعالج بدون إنترنت.",
-                        self.lang,
-                    ));
-                    ui.add_space(8.0);
-
-                    // 1. Microphone status & Live VU meter
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new(t("1. Microphone Status & Live Audio Level", "1. حالة الميكروفون ومستوى الصوت الحية", self.lang)).strong());
-                        #[cfg(feature = "voice")]
-                        {
-                            let level = crate::voice::audio_level();
-                            let is_rec = crate::voice::is_recording();
-                            let is_trans = crate::voice::is_transcribing();
-                            let status_str = if is_trans {
-                                t("⚡ Transcribing with Whisper CPU...", "⚡ جاري تحويل الصوت عبر الذكاء الاصطناعي...", self.lang)
-                            } else if is_rec {
-                                t("🔴 Recording in progress...", "🔴 جاري تسجيل الصوت الآن...", self.lang)
-                            } else {
-                                t("Ready / Microphone Standby", "جاهز / الميكروفون في وضع الاستعداد", self.lang)
-                            };
-                            ui.label(format!("{}: {status_str}", t("State", "الحالة", self.lang)));
-                            ui.horizontal(|ui| {
-                                ui.label(t("Input Level:", "مستوى الصوت:", self.lang));
-                                let bar = egui::ProgressBar::new(level)
-                                    .text(format!("{:.0}%", level * 100.0))
-                                    .animate(is_rec);
-                                ui.add(bar);
-                            });
-                            if is_rec || is_trans {
-                                ui.ctx().request_repaint_after(Duration::from_millis(30));
-                            }
-                        }
-                        #[cfg(not(feature = "voice"))]
-                        {
-                            ui.label(t("Voice feature is not enabled in this build.", "ميزة الصوت غير مفعلة في هذا الإصدار.", self.lang));
-                        }
-                    });
-
-                    ui.add_space(8.0);
-
-                    // 2. Whisper Model Status
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new(t("2. Whisper AI Model Status", "2. نموذج الذكاء الاصطناعي (Whisper Model)", self.lang)).strong());
-                        #[cfg(feature = "voice")]
-                        {
-                            let model_found = crate::voice::model_path();
-                            match model_found {
-                                Some(p) => {
-                                    ui.colored_label(egui::Color32::from_rgb(91, 217, 167), t(&format!("✔ Model loaded from: {}", p.display()), &format!("{}: {}", ar("✔ تم تحميل النموذج بنجاح من"), p.display()), self.lang));
-                                    if let Ok(meta) = std::fs::metadata(&p) {
-                                        let mb = meta.len() as f64 / (1024.0 * 1024.0);
-                                        ui.label(t(&format!("File size: {:.1} MB", mb), &format!("{}: {:.1} {}", ar("حجم الملف"), mb, ar("ميجابايت")), self.lang));
-                                    }
-                                }
-                                None => {
-                                    ui.colored_label(egui::Color32::from_rgb(255, 100, 100), t("⚠ No Whisper model found!", "⚠ لم يتم العثور على نموذج Whisper!", self.lang));
-                                    ui.label(t("Place ggml-tiny.bin (75MB) or ggml-base.bin (140MB) in:", "ضع ملف ggml-tiny.bin أو ggml-base.bin في المجلد:", self.lang));
-                                    ui.monospace("%APPDATA%\\ControllerCompanionRust\\models");
-                                }
-                            }
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label(t("Model file name:", "اسم ملف النموذج:", self.lang));
-                            ui.text_edit_singleline(&mut self.working.voice.model);
-                        });
-                    });
-
-                    ui.add_space(8.0);
-
-                    // 3. Language & VAD settings
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new(t("3. Recognition Language & Silence Detection (VAD)", "3. لغة التعرف واكتشاف السكون (Language & VAD)", self.lang)).strong());
-                        ui.horizontal(|ui| {
-                            ui.label(t("Recognition Language:", "لغة التعرف الصوتي:", self.lang));
-                            let selected_text = match self.working.voice.language.as_str() {
-                                "ar" => t("العربية (Arabic)", "العربية", self.lang),
-                                "en" => t("English", "الإنجليزية (English)", self.lang),
-                                _ => t("Auto (Match Keyboard)", "تلقائي (حسب لغة الكيبورد)", self.lang),
-                            };
-                            egui::ComboBox::from_id_source("voice_lang_picker")
-                                .selected_text(selected_text)
-                                .show_ui(ui, |ui| {
-                                    let ar_opt = t("العربية (Arabic)", "العربية", self.lang);
-                                    let en_opt = t("English", "الإنجليزية (English)", self.lang);
-                                    let auto_opt = t("Auto (Match Keyboard)", "تلقائي (حسب لغة الكيبورد)", self.lang);
-                                    ui.selectable_value(&mut self.working.voice.language, "ar".into(), ar_opt);
-                                    ui.selectable_value(&mut self.working.voice.language, "en".into(), en_opt);
-                                    ui.selectable_value(&mut self.working.voice.language, "auto".into(), auto_opt);
-                                });
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label(t("VAD Silence Pause (ms):", "مهلة السكون قبل الإنهاء التلقائي (مللي ثانية):", self.lang));
-                            ui.add(egui::Slider::new(&mut self.working.voice.vad_silence_ms, 500..=3000).text(t("Pause duration before auto-stop", "مدة التوقف قبل إيقاف التسجيل", self.lang)));
-                        });
-
-                        ui.checkbox(
-                            &mut self.working.voice.enable_macros,
-                            t("Enable natural voice macros (saying 'send' presses Enter, 'new line', punctuation)", "تفعيل ماكرو الأوامر الصوتية (نطق 'أرسل' يضغط Enter، 'سطر جديد'، علامات الترقيم)", self.lang),
-                        );
-                    });
-
-                    ui.add_space(8.0);
-
-                    // 4. Custom Vocabulary Biasing
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new(t("4. Custom Vocabulary Biasing", "4. قاموس الكلمات والمصطلحات المخصصة (Vocabulary Bias)", self.lang)).strong());
-                        ui.label(t(
-                            "Type custom terms, gamer tags, or technical names separated by commas. Whisper will prioritize recognizing them:",
-                            "اكتب مصطلحات مخصصة، أسماء ألعاب، أو كلمات دارجة مفصولة بفاصلة. سيعطيها الذكاء الاصطناعي أولوية في التعرف:",
-                            self.lang,
-                        ));
-                        let resp = ui.text_edit_singleline(&mut self.custom_vocab_input);
-                        if resp.changed() {
-                            self.working.voice.custom_vocabulary = self.custom_vocab_input
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                        }
-                        if !self.working.voice.custom_vocabulary.is_empty() {
-                            ui.label(t(
-                                &format!("Active biased terms ({}): {}", self.working.voice.custom_vocabulary.len(), self.working.voice.custom_vocabulary.join(" · ")),
-                                &format!("{}: ({}) {}", ar("الكلمات ذات الأولوية النشطة"), self.working.voice.custom_vocabulary.len(), self.working.voice.custom_vocabulary.join(" · ")),
-                                self.lang,
-                            ));
-                        }
-                    });
-
-                    ui.add_space(8.0);
-
-                    // 5. Test dictation button
-                    ui.horizontal(|ui| {
-                        #[cfg(feature = "voice")]
-                        {
-                            let is_rec = crate::voice::is_recording();
-                            let btn_label = if is_rec {
-                                t("⏹ Stop Recording & Transcribe", "⏹ إيقاف التسجيل والتحويل إلى نص", self.lang)
-                            } else {
-                                t("🎙 Start Voice Test (Speak now)", "🎙 بدء اختبار الصوت (تحدث الآن)", self.lang)
-                            };
-                            if ui.button(btn_label).clicked() {
-                                crate::voice::toggle_voice_typing(self.working.voice.language == "ar");
-                            }
-                            if let Some(last) = crate::voice::last_transcribed() {
-                                ui.label(t(&format!("Last result: \"{last}\""), &format!("{}: \"{last}\"", ar("آخر نتيجة")), self.lang));
-                            }
-                        }
-                    });
-                }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if self.page == SettingsPage::Profiles && ui.button(t("Import .amgp profile...", "استيراد بروفايل .amgp...", self.lang)).clicked() {
@@ -1732,27 +1575,6 @@ mod tests {
         let current = json!({"enabled": false, "active_profile": "Browser", "mouse": {"speed": 600, "acceleration": 400}});
         let merged = merge_edits(&original, &edited, &current);
         assert_eq!(merged, json!({"enabled": false, "active_profile": "Browser", "mouse": {"speed": 750, "acceleration": 400}}));
-    }
-
-    #[test]
-    fn test_gui_voice_tab_settings_state() {
-        let xinput = crate::win32::XInputApi::load().expect("xinput available");
-        let engine = std::sync::Arc::new(std::sync::Mutex::new(crate::engine::Engine::new(
-            xinput,
-            crate::config::Config::default(),
-        )));
-        let mut app = super::SettingsApp::new(engine, std::path::PathBuf::from("test.json"));
-        assert_eq!(app.page, super::SettingsPage::Overview);
-        app.page = super::SettingsPage::Voice;
-        assert_eq!(app.page, super::SettingsPage::Voice);
-        app.custom_vocab_input = "فيفا, فورتنايت, ديسكورد".into();
-        app.working.voice.custom_vocabulary = app.custom_vocab_input
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        assert_eq!(app.working.voice.custom_vocabulary.len(), 3);
-        assert_eq!(app.working.voice.custom_vocabulary[1], "فورتنايت");
     }
 
     #[test]

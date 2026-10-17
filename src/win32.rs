@@ -98,6 +98,17 @@ pub struct POINT {
 extern "system" {
     pub fn SendInput(nInputs: u32, pInputs: *const INPUT, cbSize: i32) -> u32;
     pub fn MapVirtualKeyW(uCode: u32, uMapType: u32) -> u32;
+    pub fn MapVirtualKeyExW(uCode: u32, uMapType: u32, dwhkl: usize) -> u32;
+    pub fn ToUnicodeEx(
+        wVirtKey: u32,
+        wScanCode: u32,
+        lpKeyState: *const u8,
+        pwszBuff: *mut u16,
+        cchBuff: i32,
+        wFlags: u32,
+        dwhkl: usize,
+    ) -> i32;
+    pub fn GetKeyboardLayout(idThread: u32) -> usize;
     pub fn GetAsyncKeyState(nVirtKey: i32) -> i16;
     pub fn SystemParametersInfoW(
         uiAction: u32,
@@ -108,6 +119,44 @@ extern "system" {
     pub fn GetCursorPos(lpPoint: *mut POINT) -> i32;
     pub fn SetCursorPos(x: i32, y: i32) -> i32;
 }
+
+pub const MAPVK_VSC_TO_VK_EX: u32 = 3;
+
+/// Query the character produced by a scan code under a specific Windows keyboard layout (HKL).
+/// `shift`: whether Shift is held.
+pub fn scancode_to_char(scan: u32, shift: bool, hkl: usize) -> Option<char> {
+    unsafe {
+        let vk = MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX, hkl);
+        if vk == 0 {
+            return None;
+        }
+        let mut key_state = [0u8; 256];
+        if shift {
+            key_state[0x10] = 0x80; // VK_SHIFT
+        }
+        let mut buf = [0u16; 8];
+        // wFlags = 4 (TM_NO_INVERT: do not alter keyboard state/dead keys)
+        let ret = ToUnicodeEx(
+            vk,
+            scan,
+            key_state.as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+            4,
+            hkl,
+        );
+        if ret > 0 {
+            let ch = char::decode_utf16(buf[..ret as usize].iter().copied())
+                .next()
+                .and_then(|r| r.ok());
+            // Filter out non-printable ASCII control characters (e.g. 0x00..0x1F)
+            ch.filter(|&c| c >= ' ' && c != '\x7f')
+        } else {
+            None
+        }
+    }
+}
+
 
 pub fn get_cursor_pos() -> Option<(i32, i32)> {
     let mut pt = POINT::default();
@@ -133,6 +182,13 @@ extern "system" {
     ) -> *mut std::ffi::c_void;
     pub fn GetLastError() -> u32;
     pub fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    pub fn GetUserDefaultUILanguage() -> u16;
+}
+
+/// Query the primary Windows UI language ID (e.g. 0x01 for Arabic, 0x09 for English).
+pub fn user_ui_primary_language() -> u16 {
+    let lang_id = unsafe { GetUserDefaultUILanguage() };
+    lang_id & 0x03FF
 }
 
 pub const ERROR_ALREADY_EXISTS: u32 = 183;
@@ -508,4 +564,16 @@ mod tests {
             println!("Slot {i}: state={st:?}, battery={bat:?}");
         }
     }
+
+    #[test]
+    fn test_scancode_to_char_active_layout() {
+        let hkl = unsafe { GetKeyboardLayout(0) };
+        println!("Active thread HKL: {hkl:#x}");
+        // Scan 0x10 is typically 'q' (or 'a' on azerty, 'ض' on arabic)
+        let c_base = scancode_to_char(0x10, false, hkl);
+        let c_shift = scancode_to_char(0x10, true, hkl);
+        println!("Scan 0x10 -> base: {c_base:?}, shift: {c_shift:?}");
+        assert!(c_base.is_some(), "scancode_to_char should resolve on standard desktop layouts");
+    }
 }
+

@@ -149,8 +149,6 @@ const C_TEXT: egui::Color32 = egui::Color32::from_rgb(245, 246, 250);
 const C_TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(148, 153, 166);
 const C_PILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(55, 55, 55, 55);
 const C_SCRIM: egui::Color32 = egui::Color32::from_rgba_premultiplied(11, 12, 15, 245);
-const C_RECORDING: egui::Color32 = egui::Color32::from_rgb(235, 55, 55);
-const C_SUCCESS: egui::Color32 = egui::Color32::from_rgb(20, 185, 125);
 const C_CLOSE_HOVER: egui::Color32 = egui::Color32::from_rgb(215, 38, 38);
 
 // Geometry (px) — every key is sized in "units", so rows stay aligned.
@@ -190,7 +188,6 @@ const HINTS: &[(&str, &str)] = &[
     ("RT + Start", "Shift + Enter (New line)"),
     ("Back (Select)", "Switch language (EN / ع)"),
     ("B / L3", "Close keyboard"),
-    ("😊 / Emoji", "Open Native Emoji Picker"),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -203,7 +200,6 @@ pub enum Lang {
 pub enum Layer {
     Abc,
     Num,
-    Emoji,
     Edit,
 }
 
@@ -282,16 +278,12 @@ enum Act {
     DeleteWord,
     EditTools,
     SelectAll,
-    VoiceDictation,
     TaskView,
     ShowDesktop,
     CloseActiveWindow,
     ClearTyped,
     AcceptPrediction(&'static str),
     FlipPosition,
-    Emoji(&'static str),
-    EmojiPicker,
-    EmojiCat(usize),
     ToggleSplitMode,
 }
 
@@ -410,7 +402,110 @@ fn bottom_row(lang: Lang, on_num: bool) -> Vec<KDef> {
     ]
 }
 
+/// Dynamically query Windows for the active keyboard layout (HKL) via ToUnicodeEx and MapVirtualKeyExW.
+/// This adapts the virtual keyboard automatically to any layout installed on the user's Windows system
+/// (e.g. German QWERTZ, French AZERTY, Russian, Spanish, Turkish, etc.) without downloading any files.
+fn windows_abc(hkl: usize) -> Vec<Vec<KDef>> {
+    let get_char = |scan: u32, shift: bool| crate::win32::scancode_to_char(scan, shift, hkl);
+
+    let r1 = {
+        let mut v = vec![KDef::spec("Esc", Act::Key(NavKey::Escape), 1.35)];
+        for (scan, def_base, def_shift) in [
+            (0x02, '1', '!'),
+            (0x03, '2', '@'),
+            (0x04, '3', '#'),
+            (0x05, '4', '$'),
+            (0x06, '5', '%'),
+            (0x07, '6', '^'),
+            (0x08, '7', '&'),
+            (0x09, '8', '*'),
+            (0x0A, '9', '('),
+            (0x0B, '0', ')'),
+            (0x0C, '-', '_'),
+            (0x0D, '=', '+'),
+        ] {
+            let base = get_char(scan, false).unwrap_or(def_base);
+            let shifted = get_char(scan, true).unwrap_or(def_shift);
+            v.push(KDef::digit(base, shifted));
+        }
+        v.push(KDef::spec("\u{232B}", Act::Backspace, 2.0).with_glyph(Glyph::Backspace));
+        v
+    };
+
+    let r2 = {
+        let mut v = vec![KDef::spec("Tab", Act::Tab, 1.5)];
+        for (scan, def_base, def_shift) in [
+            (0x10, 'q', 'Q'),
+            (0x11, 'w', 'W'),
+            (0x12, 'e', 'E'),
+            (0x13, 'r', 'R'),
+            (0x14, 't', 'T'),
+            (0x15, 'y', 'Y'),
+            (0x16, 'u', 'U'),
+            (0x17, 'i', 'I'),
+            (0x18, 'o', 'O'),
+            (0x19, 'p', 'P'),
+            (0x1A, '[', '{'),
+            (0x1B, ']', '}'),
+            (0x2B, '\\', '|'),
+        ] {
+            let base = get_char(scan, false).unwrap_or(def_base);
+            let shifted = get_char(scan, true).unwrap_or(def_shift);
+            v.push(KDef::shiftable(base, shifted));
+        }
+        v
+    };
+
+    let r3 = {
+        let mut v = vec![KDef::spec("Caps", Act::Caps, 1.75)];
+        for (scan, def_base, def_shift) in [
+            (0x1E, 'a', 'A'),
+            (0x1F, 's', 'S'),
+            (0x20, 'd', 'D'),
+            (0x21, 'f', 'F'),
+            (0x22, 'g', 'G'),
+            (0x23, 'h', 'H'),
+            (0x24, 'j', 'J'),
+            (0x25, 'k', 'K'),
+            (0x26, 'l', 'L'),
+            (0x27, ';', ':'),
+            (0x28, '\'', '"'),
+        ] {
+            let base = get_char(scan, false).unwrap_or(def_base);
+            let shifted = get_char(scan, true).unwrap_or(def_shift);
+            v.push(KDef::shiftable(base, shifted));
+        }
+        v.push(KDef::spec("\u{23CE}", Act::Enter, 2.2).with_glyph(Glyph::Enter));
+        v
+    };
+
+    let r4 = {
+        let mut v = vec![KDef::spec("Shift", Act::Shift, 2.25)];
+        for (scan, def_base, def_shift) in [
+            (0x2C, 'z', 'Z'),
+            (0x2D, 'x', 'X'),
+            (0x2E, 'c', 'C'),
+            (0x2F, 'v', 'V'),
+            (0x30, 'b', 'B'),
+            (0x31, 'n', 'N'),
+            (0x32, 'm', 'M'),
+            (0x33, ',', '<'),
+            (0x34, '.', '>'),
+            (0x35, '/', '?'),
+        ] {
+            let base = get_char(scan, false).unwrap_or(def_base);
+            let shifted = get_char(scan, true).unwrap_or(def_shift);
+            v.push(KDef::shiftable(base, shifted));
+        }
+        v.push(KDef::spec("Shift", Act::Shift, 2.75));
+        v
+    };
+
+    vec![r1, r2, r3, r4, bottom_row(Lang::En, false)]
+}
+
 fn en_abc() -> Vec<Vec<KDef>> {
+
     let r1 = vec![
         KDef::spec("Esc", Act::Key(NavKey::Escape), 1.35),
         KDef::digit('1', '!'),
@@ -608,81 +703,18 @@ fn align_rows(rows: &mut [Vec<KDef>], target_units: f32) {
     }
 }
 
-fn emoji_layer(cat: usize) -> Vec<Vec<KDef>> {
-    let tabs = vec![
-        KDef::spec("😀", Act::EmojiCat(0), 1.8),
-        KDef::spec("👍", Act::EmojiCat(1), 1.8),
-        KDef::spec("❤️", Act::EmojiCat(2), 1.8),
-        KDef::spec("🎉", Act::EmojiCat(3), 1.8),
-        KDef::spec("🍕", Act::EmojiCat(4), 1.8),
-        KDef::spec("🚀", Act::EmojiCat(5), 1.8),
-        KDef::spec("ABC", Act::ToggleLayer, 2.0),
-        KDef::spec("\u{232B}", Act::Backspace, 2.2).with_glyph(Glyph::Backspace),
-    ];
-
-    let emojis: &[&[&'static str]] = match cat {
-        1 => &[
-            &["👍", "👎", "👏", "🙌", "👐", "🤲", "🤝", "👊", "✊", "🤛", "🤜"],
-            &["🤞", "✌️", "🤟", "🤘", "👌", "🤏", "👈", "👉", "👆", "👇", "☝️"],
-            &["✋", "🤚", "🖐️", "🖖", "👋", "🤙", "💪", "🦾", "🙏", "✍️", "🤳"],
-        ],
-        2 => &[
-            &["❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣️"],
-            &["💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "💯", "🔥", "✨"],
-            &["🌟", "⭐", "💥", "💢", "💫", "💬", "💭", "🗯️", "💤", "👑", "💎"],
-        ],
-        3 => &[
-            &["🎉", "🎊", "🎈", "🎁", "🏆", "🥇", "🥈", "🥉", "⚽", "🏀", "🎮"],
-            &["🕹️", "🎲", "🎯", "🎳", "🎵", "🎶", "🎤", "🎧", "🍿", "🎬", "🎨"],
-            &["🎪", "🎭", "🎰", "🎫", "🎟️", "🎸", "🎹", "🎺", "🥁", "🛹", "🚴"],
-        ],
-        4 => &[
-            &["☕", "🍵", "🥤", "🍕", "🍔", "🍟", "🌭", "🥪", "🌮", "🌯", "🍖"],
-            &["🍗", "🥩", "🍣", "🍦", "🍩", "🍰", "🍫", "🍬", "🍭", "🍮", "🍯"],
-            &["🍎", "🍌", "🍉", "🍇", "🍓", "🍒", "🍑", "🍍", "🥥", "🥑", "🥕"],
-        ],
-        5 => &[
-            &["🚀", "🚗", "✈️", "🛵", "🚲", "⚡", "💡", "🔔", "📱", "💻", "🖥️"],
-            &["⌨️", "🕒", "⏳", "🔑", "🔒", "🔓", "📌", "📍", "🚩", "✅", "❌"],
-            &["⚠️", "❓", "❗", "➕", "➖", "✖️", "➗", "💲", "🌍", "🌙", "☀️"],
-        ],
-        _ => &[
-            &["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇", "🙂"],
-            &["🙃", "😉", "😌", "😍", "🥰", "😘", "😋", "😛", "😜", "🤪", "🤨"],
-            &["😎", "🥳", "😏", "😒", "😞", "🥺", "😢", "😭", "😤", "😠", "😡"],
-        ],
-    };
-
-    let mut rows = vec![tabs];
-    for r in emojis {
-        let mut row_keys = Vec::new();
-        for &em in *r {
-            row_keys.push(KDef::spec(em, Act::Emoji(em), 1.3));
-        }
-        rows.push(row_keys);
-    }
-
-    let bottom = vec![
-        KDef::spec("ABC", Act::ToggleLayer, 2.0),
-        KDef::spec("?123", Act::ToggleLayer, 1.8),
-        KDef::spec("Space", Act::Space, 6.0),
-        KDef::spec(".", Act::Char('.', None), 1.2),
-        KDef::spec("\u{23CE}", Act::Enter, 2.4).with_glyph(Glyph::Enter),
-    ];
-    rows.push(bottom);
-
-    let target = layout_units(&rows);
-    align_rows(&mut rows, target);
-
-    rows
-}
-
 fn build_layout(lang: Lang, layer: Layer) -> Vec<Vec<KDef>> {
     let mut rows = match (lang, layer) {
-        (Lang::En, Layer::Abc) => en_abc(),
+        (Lang::En, Layer::Abc) => {
+            let hkl = platform::active_input_hkl();
+            if hkl != 0 && (hkl & 0x03FF) != 0x01 {
+                windows_abc(hkl)
+            } else {
+                en_abc()
+            }
+        }
         (Lang::Ar, Layer::Abc) => ar_abc(),
         (lang, Layer::Num) => num_layer(lang),
-        (_, Layer::Emoji) => emoji_layer(0),
         (lang, Layer::Edit) => editing_layer(lang),
     };
     let target = layout_units(&rows);
@@ -835,6 +867,7 @@ struct VKbdApp {
     prefs: crate::config::KeyboardPrefs,
     lang: Lang,
     last_sys_lang: Option<Lang>,
+    last_sys_hkl: usize,
     layer: Layer,
     shift: ShiftState,
     last_shift_tap: Option<Instant>,
@@ -890,7 +923,6 @@ struct VKbdApp {
     repositioning: bool,
     reposition_rx: f32,
     reposition_ry: f32,
-    emoji_cat: usize,
     last_mouse_down_pos: Option<(usize, usize)>,
     grid_nav_active: bool,
 }
@@ -918,6 +950,7 @@ impl VKbdApp {
             prefs,
             lang,
             last_sys_lang: None,
+            last_sys_hkl: 0,
             layer: Layer::Abc,
             shift: ShiftState::Off,
             last_shift_tap: None,
@@ -958,18 +991,13 @@ impl VKbdApp {
             repositioning: false,
             reposition_rx: 0.0,
             reposition_ry: 0.0,
-            emoji_cat: 0,
             last_mouse_down_pos: None,
             grid_nav_active: false,
         }
     }
 
     fn rebuild(&mut self) {
-        self.rows = if self.layer == Layer::Emoji {
-            emoji_layer(self.emoji_cat)
-        } else {
-            build_layout(self.lang, self.layer)
-        };
+        self.rows = build_layout(self.lang, self.layer);
         self.dirty = false;
         self.clamp_cursor();
     }
@@ -1196,7 +1224,6 @@ impl VKbdApp {
                 self.layer = match self.layer {
                     Layer::Abc => Layer::Num,
                     Layer::Num => Layer::Abc,
-                    Layer::Emoji => Layer::Abc,
                     Layer::Edit => Layer::Abc,
                 };
                 self.dirty = true;
@@ -1251,20 +1278,6 @@ impl VKbdApp {
                 self.key.up(NavKey::LControl);
                 self.release_oneshots();
             }
-            Act::VoiceDictation => {
-                #[cfg(feature = "voice")]
-                {
-                    crate::voice::toggle_voice_typing(self.lang == Lang::Ar);
-                }
-                #[cfg(not(feature = "voice"))]
-                {
-                    self.key.down(NavKey::LWin);
-                    self.key.down(NavKey::H);
-                    self.key.up(NavKey::H);
-                    self.key.up(NavKey::LWin);
-                }
-                self.release_oneshots();
-            }
             Act::TaskView => {
                 self.key.down(NavKey::LWin);
                 self.key.down(NavKey::Tab);
@@ -1316,25 +1329,6 @@ impl VKbdApp {
                 };
                 self.window_pos = None;
                 self.sized = (0.0, 0.0);
-            }
-            Act::Emoji(em) => {
-                self.key.send_str(em);
-                self.typed_buffer.push_str(em);
-                self.typed_word.clear();
-                crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
-                crate::engine::trigger_haptic(7500, 9500, 0.022);
-            }
-            Act::EmojiPicker => {
-                crate::sound::play_sfx(crate::sound::SoundEffect::RadialSnap);
-                crate::engine::trigger_haptic(8000, 10000, 0.03);
-                self.layer = if self.layer == Layer::Emoji { Layer::Abc } else { Layer::Emoji };
-                self.dirty = true;
-            }
-            Act::EmojiCat(cat) => {
-                self.emoji_cat = cat;
-                self.dirty = true;
-                crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
-                crate::engine::trigger_haptic(6000, 8000, 0.02);
             }
             Act::ToggleSplitMode => {
                 self.split_mode = !self.split_mode;
@@ -1388,7 +1382,6 @@ impl VKbdApp {
                 | Act::DeleteWord
                 | Act::ClearTyped
                 | Act::SelectAll
-                | Act::VoiceDictation
                 | Act::TaskView
                 | Act::ShowDesktop
                 | Act::CloseActiveWindow
@@ -1499,8 +1492,8 @@ impl VKbdApp {
                 self.hide();
             }
             5 => {
-                // Voice Dictation
-                self.perform_in_context(Act::VoiceDictation);
+                // Paste (Ctrl+V)
+                self.perform_in_context(Act::Paste);
                 self.hide();
             }
             6 => {
@@ -1538,13 +1531,11 @@ impl VKbdApp {
         } else if has_clear {
             acts.push(Act::Enter);
         }
-        acts.push(Act::VoiceDictation);
         acts.push(Act::Copy);
         acts.push(Act::Paste);
         acts.push(Act::Cut);
         acts.push(Act::Undo);
         acts.push(Act::SelectAll);
-        acts.push(Act::EmojiPicker);
         acts.push(Act::FlipPosition);
         acts.push(Act::ToggleSplitMode);
         acts.push(Act::Lang);
@@ -1555,7 +1546,7 @@ impl VKbdApp {
         let acts = self.get_toolbar_actions();
         if let Some(&act) = acts.get(self.toolbar_col) {
             self.perform_in_context(act);
-            if matches!(act, Act::AcceptPrediction(_) | Act::Enter | Act::ClearTyped | Act::Emoji(_) | Act::EmojiPicker) {
+            if matches!(act, Act::AcceptPrediction(_) | Act::Enter | Act::ClearTyped) {
                 self.toolbar_focused = false;
             }
         }
@@ -1605,7 +1596,6 @@ impl VKbdApp {
             self.layer = match self.layer {
                 Layer::Abc => Layer::Num,
                 Layer::Num => Layer::Abc,
-                Layer::Emoji => Layer::Abc,
                 Layer::Edit => Layer::Abc,
             };
             self.dirty = true;
@@ -1828,14 +1818,19 @@ impl eframe::App for VKbdApp {
             ));
         }
         // Automatically detect Windows active keyboard layout / input language transitions
-        if let Some(sys_lang) = platform::active_input_language() {
-            if self.last_sys_lang != Some(sys_lang) {
-                self.last_sys_lang = Some(sys_lang);
-                if self.lang != sys_lang {
-                    self.lang = sys_lang;
-                    self.dirty = true;
-                }
+        let current_hkl = platform::active_input_hkl();
+        if self.last_sys_hkl != current_hkl {
+            self.last_sys_hkl = current_hkl;
+            let sys_lang = if (current_hkl & 0x03FF) == 0x01 {
+                Lang::Ar
+            } else {
+                Lang::En
+            };
+            self.last_sys_lang = Some(sys_lang);
+            if self.lang != sys_lang {
+                self.lang = sys_lang;
             }
+            self.dirty = true;
         }
 
         // Dynamically apply updated preferences from settings UI
@@ -1849,17 +1844,6 @@ impl eframe::App for VKbdApp {
 
         if self.dirty {
             self.rebuild();
-        }
-
-        #[cfg(feature = "voice")]
-        if let Some(transcribed) = crate::voice::take_last_transcribed() {
-            let clean = transcribed.trim();
-            if !clean.is_empty() {
-                if !self.typed_buffer.is_empty() && !self.typed_buffer.ends_with(' ') {
-                    self.typed_buffer.push(' ');
-                }
-                self.typed_buffer.push_str(clean);
-            }
         }
 
         let cur_mode = match OVERLAY_MODE.load(Ordering::SeqCst) {
@@ -2323,49 +2307,8 @@ fn paint_toolbar(
     let painter = ui.painter_at(rect.expand(2.0));
     painter.rect_filled(rect, 8.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 45));
 
-    #[cfg(feature = "voice")]
-    let (is_rec, is_transcribing, had_speech) = (
-        crate::voice::is_recording(),
-        crate::voice::is_transcribing(),
-        crate::voice::had_speech(),
-    );
-    #[cfg(not(feature = "voice"))]
-    let (is_rec, is_transcribing, had_speech) = (false, false, false);
-
-    if is_rec || is_transcribing {
-        ui.ctx().request_repaint_after(Duration::from_millis(40));
-    }
-
     let is_ar = lang == Lang::Ar;
     let has_clear = !typed_buffer.is_empty();
-
-    let voice_label = if is_transcribing {
-        if is_ar {
-            crate::arabic::reshape_ar("⚡ معالجة...")
-        } else {
-            "⚡ Sending...".to_string()
-        }
-    } else if is_rec {
-        if had_speech {
-            if is_ar {
-                crate::arabic::reshape_ar("🗣 مسموع")
-            } else {
-                "🗣 Speaking".to_string()
-            }
-        } else {
-            if is_ar {
-                crate::arabic::reshape_ar("🔴 استماع")
-            } else {
-                "🔴 Listening".to_string()
-            }
-        }
-    } else {
-        if is_ar {
-            crate::arabic::reshape_ar("🎙 إملاء")
-        } else {
-            "🎙 Dictate".to_string()
-        }
-    };
 
     // --- Build right contextual buttons ---
     struct RightBtn {
@@ -2442,13 +2385,11 @@ fn paint_toolbar(
         });
     };
     let add_common = |btns: &mut Vec<RightBtn>| {
-        add_shortcut(btns, voice_label.clone(), Act::VoiceDictation);
         add_shortcut(btns, copy_lbl.clone(), Act::Copy);
         add_shortcut(btns, paste_lbl.clone(), Act::Paste);
         add_shortcut(btns, cut_lbl.clone(), Act::Cut);
         add_shortcut(btns, undo_lbl.clone(), Act::Undo);
         add_shortcut(btns, sel_all_lbl.clone(), Act::SelectAll);
-        add_shortcut(btns, "😊 Emoji".to_string(), Act::EmojiPicker);
         add_shortcut(btns, flip_lbl.clone(), Act::FlipPosition);
         add_shortcut(btns, split_lbl.clone(), Act::ToggleSplitMode);
         add_shortcut(btns, lang_lbl.clone(), Act::Lang);
@@ -2502,9 +2443,7 @@ fn paint_toolbar(
     painter.rect_stroke(search_rect, 7.0, search_stroke);
 
     // Search icon on left
-    let icon_col = if is_rec {
-        C_RECORDING
-    } else if !typed_buffer.is_empty() {
+    let icon_col = if !typed_buffer.is_empty() {
         C_ACCENT
     } else {
         C_TEXT_DIM
@@ -2661,19 +2600,8 @@ fn paint_toolbar(
         let hovered = resp.hovered();
         let p = ui.painter_at(ir.expand(2.5));
 
-        let is_voice_active = btn.act == Act::VoiceDictation && (is_rec || is_transcribing);
-
         let (fill, stroke, text_col) = if is_focus {
             (C_ACCENT, egui::Stroke::new(1.5, C_ACCENT_HOVER), C_ON_ACCENT)
-        } else if is_voice_active {
-            let bg = if is_transcribing {
-                C_ACCENT
-            } else if had_speech {
-                C_SUCCESS
-            } else {
-                C_RECORDING
-            };
-            (bg, egui::Stroke::NONE, C_ON_ACCENT)
         } else if btn.is_primary {
             if hovered {
                 (C_ACCENT, egui::Stroke::NONE, C_ON_ACCENT)
@@ -2737,7 +2665,7 @@ fn paint_radial_menu(
         ("🗔 Task View", "المهام"),
         ("🔉 Vol Down", "خفض الصوت"),
         ("🖥 Desktop", "سطح المكتب"),
-        ("🎙 Dictate", "إملاء صوتي"),
+        ("📋 Paste", "لصق"),
         ("✕ Close App", "إغلاق النافذة"),
         ("📸 Capture", "لقطة شاشة"),
     ];
@@ -2964,7 +2892,6 @@ fn paint_chrome(ui: &mut egui::Ui, area: egui::Rect, st: &ChromeStatus) -> Chrom
         (Lang::Ar, Layer::Abc) => "ع · أبجد",
         (Lang::En, Layer::Num) => "EN · 123",
         (Lang::Ar, Layer::Num) => "ع · 123",
-        (_, Layer::Emoji) => "😊 EMOJI",
         (_, Layer::Edit) => "EDIT · تحرير",
     };
     let reshaped_mode = if st.lang == Lang::Ar || mode_tag.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)) {
@@ -3978,20 +3905,5 @@ mod tests {
         assert!(!app.split_mode);
         let acts = app.get_toolbar_actions();
         assert!(acts.contains(&Act::ToggleSplitMode));
-    }
-
-    #[test]
-    fn emoji_layer_has_uniform_row_widths_and_reposition_flag() {
-        for cat in 0..6 {
-            let rows = emoji_layer(cat);
-            let target = layout_units(&rows);
-            for (idx, r) in rows.iter().enumerate() {
-                let units: f32 = r.iter().map(|k| k.w).sum();
-                assert!(
-                    (units - target).abs() < 0.01,
-                    "cat {cat} row {idx} width {units} != target {target}"
-                );
-            }
-        }
     }
 }
