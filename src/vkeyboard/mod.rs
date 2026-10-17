@@ -1626,6 +1626,8 @@ pub fn spawn(
                     .with_inner_size([BASE_W * prefs.scale, BASE_H * prefs.scale])
                     .with_position([-4000.0, -4000.0])
                     .with_always_on_top()
+                    .with_visible(start_visible)
+                    .with_active(false)
                     .with_decorations(false)
                     .with_transparent(true),
                 event_loop_builder: Some(Box::new(|builder| {
@@ -1644,6 +1646,7 @@ pub fn spawn(
                         *g = Some(cc.egui_ctx.clone());
                     }
                     install_fonts(&cc.egui_ctx);
+                    let _ = crate::platform::enforce_overlay_style(WINDOW_TITLE, false);
                     Box::new(VKbdApp::new(
                         flag.clone(),
                         nav.clone(),

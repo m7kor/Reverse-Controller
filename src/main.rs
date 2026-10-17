@@ -548,7 +548,7 @@ fn main() {
                             let outside_overlay = !platform::cursor_is_inside_overlay();
                             if immunity_passed && outside_overlay && platform::is_physical_mouse_button_down() {
                                 f2.store(false, Ordering::SeqCst);
-                                platform::set_window_visible("CCVKbd", false);
+                                platform::set_window_visible(crate::vkeyboard::WINDOW_TITLE, false);
                                 vkeyboard::request_vkeyboard_repaint();
                                 opened_at = None;
                             }

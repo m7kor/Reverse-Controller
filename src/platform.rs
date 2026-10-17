@@ -46,23 +46,26 @@ pub struct POINT {
 
 #[link(name = "user32")]
 extern "system" {
-    fn SetWindowsHookExW(id: i32, hook: LRESULT, module: HINSTANCE, thread: DWORD) -> HANDLE;
-    fn CallNextHookEx(hook: HANDLE, code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
-    fn UnhookWindowsHookEx(hook: HANDLE) -> BOOL;
+    fn RegisterHotKey(hwnd: HWND, id: i32, fsModifiers: u32, vk: u32) -> BOOL;
+    fn UnregisterHotKey(hwnd: HWND, id: i32) -> BOOL;
+    fn PostThreadMessageW(idThread: DWORD, msg: u32, wParam: WPARAM, lParam: LPARAM) -> BOOL;
+    fn PeekMessageW(msg: *mut MSG, hwnd: HWND, min: u32, max: u32, remove: u32) -> BOOL;
     fn WindowFromPoint(point: POINT) -> HWND;
     fn GetClassNameW(hwnd: HWND, buf: *mut u16, max: i32) -> i32;
     fn LoadCursorW(inst: HINSTANCE, name: usize) -> HCURSOR;
     fn GetAsyncKeyState(vk: i32) -> i16;
 }
 
-const WH_MOUSE_LL: i32 = 14;
-const WH_KEYBOARD_LL: i32 = 13;
+const WM_HOTKEY: u32 = 0x0312;
+const WM_USER_RELOAD_HOTKEY: u32 = 0x0400 + 201;
+static HOTKEY_THREAD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 const WM_LBUTTONDOWN: i32 = 0x0201;
 const WM_LBUTTONUP: i32 = 0x0202;
 const WM_KEYDOWN: i32 = 0x0100;
 const WM_SYSKEYDOWN: i32 = 0x0104;
 
-/// Hotkey chords recognised by the global keyboard hook.
+/// Hotkey chords recognised by the global hotkey registrar.
 ///
 /// Modifiers are **flags**, not virtual-key codes: the VK values (0x10, 0x11,
 /// 0x12, 0x5B) overlap bitwise, so OR-ing them together would make Ctrl and
@@ -92,15 +95,6 @@ pub fn take_hotkey() -> bool {
     HOTKEY_FIRED.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
 
-#[repr(C)]
-struct KBDLLHOOKSTRUCT {
-    vk_code: u32,
-    scan_code: u32,
-    flags: u32,
-    time: DWORD,
-    dw_extra_info: usize,
-}
-
 /// Register the global hotkey chord to watch for.
 static HOTKEY: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(pack_hotkey(MOD_CONTROL, 'K' as u32));
@@ -111,44 +105,92 @@ pub const fn pack_hotkey(mods: u32, vk: u32) -> u64 {
 }
 
 /// Start listening for `mods` + `vk` system-wide.
-///
-/// The hook must swallow the key so it does not also reach the focused app —
-/// otherwise the hotkey would type a stray letter every time it is pressed.
 pub fn hotkey_watch_start(mods: u32, vk: u32) {
     set_hotkey(Some((mods, vk)));
 }
 
+/// Map internal modifier flags to Win32 RegisterHotKey modifiers.
+fn to_register_hotkey_modifiers(mods: u32) -> u32 {
+    let mut out = 0x4000; // MOD_NOREPEAT
+    if mods & MOD_SHIFT != 0 {
+        out |= 0x0004;
+    }
+    if mods & MOD_CONTROL != 0 {
+        out |= 0x0002;
+    }
+    if mods & MOD_MENU != 0 {
+        out |= 0x0001;
+    }
+    if mods & MOD_WIN != 0 {
+        out |= 0x0008;
+    }
+    out
+}
+
 /// Change (or with `None`, disable) the global toggle shortcut at runtime.
 ///
-/// The keyboard hook is installed the first time a shortcut is set and stays
-/// for the life of the process; disabling just clears the chord it matches.
+/// Uses native Win32 `RegisterHotKey` instead of dangerous low-level hooks (`WH_KEYBOARD_LL`).
+/// This guarantees 0% chance of blocking or freezing the physical keyboard on the system.
 pub fn set_hotkey(chord: Option<(u32, u32)>) {
     use std::sync::atomic::Ordering;
-    static HOOK_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let Some((mods, vk)) = chord else {
-        HOTKEY.store(0, Ordering::SeqCst);
-        return;
+    static THREAD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let packed = match chord {
+        Some((mods, vk)) => pack_hotkey(mods, vk),
+        None => 0,
     };
-    HOTKEY.store(pack_hotkey(mods, vk), Ordering::SeqCst);
-    if HOOK_STARTED.swap(true, Ordering::SeqCst) {
+    HOTKEY.store(packed, Ordering::SeqCst);
+    if THREAD_STARTED.swap(true, Ordering::SeqCst) {
+        let tid = HOTKEY_THREAD_ID.load(Ordering::SeqCst);
+        if tid != 0 {
+            unsafe {
+                PostThreadMessageW(tid, WM_USER_RELOAD_HOTKEY, 0, 0);
+            }
+        }
         return;
     }
     std::thread::spawn(|| unsafe {
-        let hook = SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            keyboard_hook_proc as *const () as LRESULT,
-            std::ptr::null_mut(),
-            0,
-        );
-        if hook.is_null() {
-            return;
-        }
+        attach_thread_to_desktop();
+        let tid = GetCurrentThreadId();
+        HOTKEY_THREAD_ID.store(tid, Ordering::SeqCst);
+
+        // Force creation of the message queue for this thread
         let mut msg: MSG = std::mem::zeroed();
+        PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, 0);
+
+        let mut registered = false;
+        let apply = |reg: &mut bool| {
+            if *reg {
+                UnregisterHotKey(std::ptr::null_mut(), 1);
+                *reg = false;
+            }
+            let want = HOTKEY.load(Ordering::SeqCst);
+            let want_mods = (want >> 32) as u32;
+            let want_vk = (want & 0xFFFF_FFFF) as u32;
+            if want_vk != 0 {
+                let win_mods = to_register_hotkey_modifiers(want_mods);
+                if RegisterHotKey(std::ptr::null_mut(), 1, win_mods, want_vk) != 0 {
+                    *reg = true;
+                    log_debug(&format!("[hotkey] Registered chord vk={want_vk:#x} mods={win_mods:#x} via RegisterHotKey"));
+                } else {
+                    log_debug(&format!("[hotkey] RegisterHotKey failed for vk={want_vk:#x} mods={win_mods:#x}"));
+                }
+            }
+        };
+
+        apply(&mut registered);
+
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.message == WM_HOTKEY {
+                HOTKEY_FIRED.store(true, Ordering::SeqCst);
+            } else if msg.message == WM_USER_RELOAD_HOTKEY {
+                apply(&mut registered);
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        UnhookWindowsHookEx(hook);
+        if registered {
+            UnregisterHotKey(std::ptr::null_mut(), 1);
+        }
     });
 }
 
@@ -210,7 +252,7 @@ pub fn controller_used_within_ms(ms: u64) -> bool {
 }
 
 pub fn last_click_was_controller() -> bool {
-    LAST_CLICK_WAS_CONTROLLER.load(std::sync::atomic::Ordering::Relaxed)
+    LAST_CLICK_WAS_CONTROLLER.load(std::sync::atomic::Ordering::Relaxed) && last_click_within_ms(500)
 }
 
 pub fn take_physical_mouse_click() -> bool {
@@ -269,10 +311,14 @@ pub fn reset_last_click_was_controller() {
 }
 
 pub fn is_physical_mouse_button_down() -> bool {
-    if controller_used_within_ms(600) || last_click_was_controller() {
+    if controller_used_within_ms(300) {
         return false;
     }
-    unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 }
+    let down = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 };
+    if down {
+        LAST_CLICK_WAS_CONTROLLER.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    down
 }
 
 pub fn cursor_is_inside_overlay() -> bool {
@@ -432,54 +478,6 @@ pub fn check_accessible_text(pt: POINT) -> bool {
     }
 }
 
-#[allow(dead_code)]
-extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
-}
-
-extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    use std::sync::atomic::Ordering;
-    let msg = wparam as i32;
-    if code == 0
-        && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
-        && lparam != 0
-    {
-        let want = HOTKEY.load(Ordering::Relaxed);
-        let want_mods = (want >> 32) as u32;
-        let want_vk = (want & 0xFFFF_FFFF) as u32;
-        let hs = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-        if want_vk != 0 && hs.vk_code == want_vk && current_modifiers() == want_mods {
-            HOTKEY_FIRED.store(true, Ordering::SeqCst);
-            // Returning 1 swallows the key so the focused app never sees it.
-            return 1;
-        }
-    }
-    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
-}
-
-/// The modifier keys currently held, in the bit layout `HotkeyChord` uses.
-///
-/// `GetAsyncKeyState` is used rather than tracking the hook's own events: it is
-/// correct even when a modifier was pressed before the hook existed, and this
-/// runs on a hotkey press only.
-fn current_modifiers() -> u32 {
-    unsafe {
-        let mut mods = 0;
-        if GetAsyncKeyState(VK_SHIFT as i32) < 0 {
-            mods |= MOD_SHIFT;
-        }
-        if GetAsyncKeyState(VK_CONTROL as i32) < 0 {
-            mods |= MOD_CONTROL;
-        }
-        if GetAsyncKeyState(VK_MENU as i32) < 0 {
-            mods |= MOD_MENU;
-        }
-        if GetAsyncKeyState(VK_LWIN as i32) < 0 {
-            mods |= MOD_WIN;
-        }
-        mods
-    }
-}
 
 /// Decide whether a click at `pt` landed on something that accepts typed text.
 /// Avoids slow cross-process COM (`AccessibleObjectFromPoint`) or false-positive
@@ -761,15 +759,25 @@ pub fn move_window_at_cursor(dx: i32, dy: i32) {
 }
 
 fn find_target_hwnd(title: &str) -> HWND {
-    if title == "CCVKbd" {
+    let is_overlay_query = title == "CCVKbd" || title == "Controller Companion Keyboard";
+    if is_overlay_query {
         let h = overlay_hwnd() as HWND;
         if !h.is_null() && unsafe { IsWindow(h) != 0 } {
             return h;
         }
     }
     let wide = to_wide(title);
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
-    if !hwnd.is_null() && title == "CCVKbd" {
+    let mut hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
+    if hwnd.is_null() && is_overlay_query {
+        let alt_title = if title == "CCVKbd" {
+            "Controller Companion Keyboard"
+        } else {
+            "CCVKbd"
+        };
+        let alt = to_wide(alt_title);
+        hwnd = unsafe { FindWindowW(std::ptr::null(), alt.as_ptr()) };
+    }
+    if !hwnd.is_null() && is_overlay_query {
         note_overlay(hwnd as usize);
     }
     hwnd

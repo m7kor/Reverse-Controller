@@ -62,10 +62,11 @@ fn modifier_bit(m: Option<Modifier>) -> u8 {
 /// Analog triggers release a quarter below the press threshold, so a trigger
 /// resting right at the threshold cannot chatter a held Ctrl or Shift.
 fn input_active(input: Input, buttons: u16, lt: u8, rt: u8, trigger_threshold: u8, held: bool) -> bool {
+    let base = trigger_threshold.max(10);
     let threshold = if held {
-        trigger_threshold - trigger_threshold / 4
+        base.saturating_sub(base / 4).max(5)
     } else {
-        trigger_threshold
+        base
     };
     match input {
         Input::LeftTrigger => lt >= threshold,
