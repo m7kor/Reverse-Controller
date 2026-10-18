@@ -474,7 +474,27 @@ pub struct Engine {
     nav_mouse_down: bool,
     last_cursor_pos: Option<(i32, i32)>,
     was_fullscreen_paused: bool,
-    stick_resize_quadrant: Option<crate::altsnap::ResizeQuadrant>,
+    stick_drag_state: Option<StickDragState>,
+    stick_resize_state: Option<StickResizeState>,
+}
+
+#[derive(Clone, Debug)]
+struct StickDragState {
+    hwnd: usize,
+    pos_x: f32,
+    pos_y: f32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Debug)]
+struct StickResizeState {
+    hwnd: usize,
+    quadrant: crate::altsnap::ResizeQuadrant,
+    pos_x: f32,
+    pos_y: f32,
+    width: f32,
+    height: f32,
 }
 
 static PENDING_RUMBLE: Mutex<Option<(u16, u16, f64)>> = Mutex::new(None);
@@ -549,7 +569,8 @@ impl Engine {
             nav_mouse_down: false,
             last_cursor_pos: None,
             was_fullscreen_paused: false,
-            stick_resize_quadrant: None,
+            stick_drag_state: None,
+            stick_resize_state: None,
         };
         eng.generic.set_overrides(pad_overrides(&eng.config));
         eng.rebuild_bindings();
@@ -1356,20 +1377,122 @@ impl Engine {
     fn window_drag(&mut self, axes: (f32, f32), dt: f64) {
         let (x, y) = axes;
         let mag = (x * x + y * y).sqrt();
-        if mag <= self.config.controller.right_stick_dead_zone as f32 || mag == 0.0 {
+        let deadzone = self.config.controller.right_stick_dead_zone as f32;
+        if mag <= deadzone || mag == 0.0 {
+            if let Some(state) = self.stick_drag_state.take() {
+                if self.config.altsnap.auto_maximize {
+                    let mut pt = crate::altsnap::POINT::default();
+                    unsafe {
+                        #[link(name = "user32")]
+                        extern "system" {
+                            fn GetCursorPos(lpPoint: *mut crate::altsnap::POINT) -> i32;
+                            fn ShowWindowAsync(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+                        }
+                        GetCursorPos(&mut pt);
+                        let (_wa_x, wa_y, _wa_w, _wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+                        if pt.y <= wa_y + 4 {
+                            ShowWindowAsync(state.hwnd as _, 3 /* SW_MAXIMIZE */);
+                        }
+                    }
+                }
+            }
             return;
         }
+
         let speed = 900.0f32; // smooth window move speed in pixels/s
         let dx = (x / 32767.0) * speed * dt as f32;
         let dy = (-y / 32767.0) * speed * dt as f32; // Invert stick Y for screen Y
-        if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
-            crate::altsnap::move_window_relative(
-                hwnd,
-                dx.round() as i32,
-                dy.round() as i32,
-                self.config.altsnap.snap_distance,
-                self.config.altsnap.snap_to_edges,
-                self.config.altsnap.auto_maximize,
+
+        let snap_dist = self.config.altsnap.snap_distance;
+        let snap_edges = self.config.altsnap.snap_to_edges;
+
+        let state = match self.stick_drag_state.as_mut() {
+            Some(s) => s,
+            None => {
+                let Some(hwnd) = crate::altsnap::get_window_under_cursor() else { return; };
+                unsafe {
+                    #[link(name = "user32")]
+                    extern "system" {
+                        fn SetForegroundWindow(hWnd: *mut std::ffi::c_void) -> i32;
+                        fn IsZoomed(hWnd: *mut std::ffi::c_void) -> i32;
+                        fn ShowWindow(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+                        fn GetWindowRect(hWnd: *mut std::ffi::c_void, lpRect: *mut crate::altsnap::RECT) -> i32;
+                    }
+                    SetForegroundWindow(hwnd);
+                    if IsZoomed(hwnd) != 0 {
+                        ShowWindow(hwnd, 9 /* SW_RESTORE */);
+                    }
+                    let mut rect = crate::altsnap::RECT::default();
+                    if GetWindowRect(hwnd, &mut rect) == 0 {
+                        return;
+                    }
+                    let w = rect.right - rect.left;
+                    let h = rect.bottom - rect.top;
+                    self.stick_drag_state = Some(StickDragState {
+                        hwnd: hwnd as usize,
+                        pos_x: rect.left as f32,
+                        pos_y: rect.top as f32,
+                        width: w,
+                        height: h,
+                    });
+                }
+                self.stick_drag_state.as_mut().unwrap()
+            }
+        };
+
+        state.pos_x += dx;
+        state.pos_y += dy;
+
+        let mut display_x = state.pos_x.round() as i32;
+        let mut display_y = state.pos_y.round() as i32;
+
+        if snap_edges && snap_dist > 0 {
+            let mut pt = crate::altsnap::POINT::default();
+            unsafe {
+                #[link(name = "user32")]
+                extern "system" {
+                    fn GetCursorPos(lpPoint: *mut crate::altsnap::POINT) -> i32;
+                }
+                GetCursorPos(&mut pt);
+            }
+            let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+            let wa_right = wa_x + wa_w;
+            let wa_bottom = wa_y + wa_h;
+
+            if (display_x - wa_x).abs() <= snap_dist {
+                display_x = wa_x;
+            } else if (display_x + state.width - wa_right).abs() <= snap_dist {
+                display_x = wa_right - state.width;
+            }
+
+            if (display_y - wa_y).abs() <= snap_dist {
+                display_y = wa_y;
+            } else if (display_y + state.height - wa_bottom).abs() <= snap_dist {
+                display_y = wa_bottom - state.height;
+            }
+        }
+
+        unsafe {
+            #[link(name = "user32")]
+            extern "system" {
+                fn SetWindowPos(
+                    hWnd: *mut std::ffi::c_void,
+                    hWndInsertAfter: *mut std::ffi::c_void,
+                    X: i32,
+                    Y: i32,
+                    cx: i32,
+                    cy: i32,
+                    uFlags: u32,
+                ) -> i32;
+            }
+            SetWindowPos(
+                state.hwnd as _,
+                std::ptr::null_mut(),
+                display_x,
+                display_y,
+                0,
+                0,
+                0x0001 /* SWP_NOSIZE */ | 0x0004 /* SWP_NOZORDER */ | 0x0010 /* SWP_NOACTIVATE */ | 0x4000 /* SWP_ASYNCWINDOWPOS */,
             );
         }
     }
@@ -1378,40 +1501,165 @@ impl Engine {
     fn window_resize(&mut self, axes: (f32, f32), dt: f64) {
         let (x, y) = axes;
         let mag = (x * x + y * y).sqrt();
-        if mag <= self.config.controller.right_stick_dead_zone as f32 || mag == 0.0 {
-            self.stick_resize_quadrant = None;
+        let deadzone = self.config.controller.right_stick_dead_zone as f32;
+        if mag <= deadzone || mag == 0.0 {
+            self.stick_resize_state = None;
             return;
         }
+
         let speed = 900.0f32;
         let dx = (x / 32767.0) * speed * dt as f32;
         let dy = (-y / 32767.0) * speed * dt as f32;
-        if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
-            let quad = match self.stick_resize_quadrant {
-                Some(q) => q,
-                None => {
+
+        let snap_dist = self.config.altsnap.snap_distance;
+        let snap_edges = self.config.altsnap.snap_to_edges;
+
+        let state = match self.stick_resize_state.as_mut() {
+            Some(s) => s,
+            None => {
+                let Some(hwnd) = crate::altsnap::get_window_under_cursor() else { return; };
+                unsafe {
+                    #[link(name = "user32")]
+                    extern "system" {
+                        fn SetForegroundWindow(hWnd: *mut std::ffi::c_void) -> i32;
+                        fn IsZoomed(hWnd: *mut std::ffi::c_void) -> i32;
+                        fn ShowWindow(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+                        fn GetCursorPos(lpPoint: *mut crate::altsnap::POINT) -> i32;
+                        fn GetWindowRect(hWnd: *mut std::ffi::c_void, lpRect: *mut crate::altsnap::RECT) -> i32;
+                    }
+                    SetForegroundWindow(hwnd);
+                    if IsZoomed(hwnd) != 0 {
+                        ShowWindow(hwnd, 9 /* SW_RESTORE */);
+                    }
                     let mut pt = crate::altsnap::POINT::default();
                     let mut rect = crate::altsnap::RECT::default();
-                    unsafe {
-                        #[link(name = "user32")]
-                        extern "system" {
-                            fn GetCursorPos(lpPoint: *mut crate::altsnap::POINT) -> i32;
-                            fn GetWindowRect(hWnd: *mut std::ffi::c_void, lpRect: *mut crate::altsnap::RECT) -> i32;
-                        }
-                        GetCursorPos(&mut pt);
-                        GetWindowRect(hwnd, &mut rect);
+                    GetCursorPos(&mut pt);
+                    if GetWindowRect(hwnd, &mut rect) == 0 {
+                        return;
                     }
-                    let q = crate::altsnap::detect_resize_quadrant(&rect, pt.x, pt.y);
-                    self.stick_resize_quadrant = Some(q);
-                    q
+                    let quad = crate::altsnap::detect_resize_quadrant(&rect, pt.x, pt.y);
+                    self.stick_resize_state = Some(StickResizeState {
+                        hwnd: hwnd as usize,
+                        quadrant: quad,
+                        pos_x: rect.left as f32,
+                        pos_y: rect.top as f32,
+                        width: (rect.right - rect.left) as f32,
+                        height: (rect.bottom - rect.top) as f32,
+                    });
                 }
-            };
-            crate::altsnap::resize_window_relative(
-                hwnd,
-                dx.round() as i32,
-                dy.round() as i32,
-                quad,
-                self.config.altsnap.snap_distance,
-                self.config.altsnap.snap_to_edges,
+                self.stick_resize_state.as_mut().unwrap()
+            }
+        };
+
+        let min_w = 160.0f32;
+        let min_h = 100.0f32;
+
+        match state.quadrant {
+            crate::altsnap::ResizeQuadrant::TopLeft => {
+                let nw = (state.width - dx).max(min_w);
+                state.pos_x += state.width - nw;
+                state.width = nw;
+                let nh = (state.height - dy).max(min_h);
+                state.pos_y += state.height - nh;
+                state.height = nh;
+            }
+            crate::altsnap::ResizeQuadrant::TopRight => {
+                state.width = (state.width + dx).max(min_w);
+                let nh = (state.height - dy).max(min_h);
+                state.pos_y += state.height - nh;
+                state.height = nh;
+            }
+            crate::altsnap::ResizeQuadrant::BottomLeft => {
+                let nw = (state.width - dx).max(min_w);
+                state.pos_x += state.width - nw;
+                state.width = nw;
+                state.height = (state.height + dy).max(min_h);
+            }
+            crate::altsnap::ResizeQuadrant::BottomRight => {
+                state.width = (state.width + dx).max(min_w);
+                state.height = (state.height + dy).max(min_h);
+            }
+            crate::altsnap::ResizeQuadrant::Left => {
+                let nw = (state.width - dx).max(min_w);
+                state.pos_x += state.width - nw;
+                state.width = nw;
+            }
+            crate::altsnap::ResizeQuadrant::Right => {
+                state.width = (state.width + dx).max(min_w);
+            }
+            crate::altsnap::ResizeQuadrant::Top => {
+                let nh = (state.height - dy).max(min_h);
+                state.pos_y += state.height - nh;
+                state.height = nh;
+            }
+            crate::altsnap::ResizeQuadrant::Bottom => {
+                state.height = (state.height + dy).max(min_h);
+            }
+        }
+
+        let mut display_x = state.pos_x.round() as i32;
+        let mut display_y = state.pos_y.round() as i32;
+        let mut display_w = state.width.round() as i32;
+        let mut display_h = state.height.round() as i32;
+
+        if snap_edges && snap_dist > 0 {
+            let mut pt = crate::altsnap::POINT::default();
+            unsafe {
+                #[link(name = "user32")]
+                extern "system" {
+                    fn GetCursorPos(lpPoint: *mut crate::altsnap::POINT) -> i32;
+                }
+                GetCursorPos(&mut pt);
+            }
+            let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+            let wa_right = wa_x + wa_w;
+            let wa_bottom = wa_y + wa_h;
+
+            if matches!(state.quadrant, crate::altsnap::ResizeQuadrant::TopLeft | crate::altsnap::ResizeQuadrant::BottomLeft | crate::altsnap::ResizeQuadrant::Left)
+                && (display_x - wa_x).abs() <= snap_dist
+            {
+                display_w += display_x - wa_x;
+                display_x = wa_x;
+            }
+            if matches!(state.quadrant, crate::altsnap::ResizeQuadrant::TopRight | crate::altsnap::ResizeQuadrant::BottomRight | crate::altsnap::ResizeQuadrant::Right)
+                && (display_x + display_w - wa_right).abs() <= snap_dist
+            {
+                display_w = wa_right - display_x;
+            }
+            if matches!(state.quadrant, crate::altsnap::ResizeQuadrant::TopLeft | crate::altsnap::ResizeQuadrant::TopRight | crate::altsnap::ResizeQuadrant::Top)
+                && (display_y - wa_y).abs() <= snap_dist
+            {
+                display_h += display_y - wa_y;
+                display_y = wa_y;
+            }
+            if matches!(state.quadrant, crate::altsnap::ResizeQuadrant::BottomLeft | crate::altsnap::ResizeQuadrant::BottomRight | crate::altsnap::ResizeQuadrant::Bottom)
+                && (display_y + display_h - wa_bottom).abs() <= snap_dist
+            {
+                display_h = wa_bottom - display_y;
+            }
+        }
+
+        unsafe {
+            #[link(name = "user32")]
+            extern "system" {
+                fn SetWindowPos(
+                    hWnd: *mut std::ffi::c_void,
+                    hWndInsertAfter: *mut std::ffi::c_void,
+                    X: i32,
+                    Y: i32,
+                    cx: i32,
+                    cy: i32,
+                    uFlags: u32,
+                ) -> i32;
+            }
+            SetWindowPos(
+                state.hwnd as _,
+                std::ptr::null_mut(),
+                display_x,
+                display_y,
+                display_w,
+                display_h,
+                0x0004 /* SWP_NOZORDER */ | 0x0010 /* SWP_NOACTIVATE */ | 0x4000 /* SWP_ASYNCWINDOWPOS */,
             );
         }
     }
