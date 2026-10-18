@@ -161,7 +161,7 @@ pub fn paint_toolbar(
             );
         }
 
-        if resp.clicked() || (hovered && ui.input(|i| i.pointer.primary_pressed())) {
+        if resp.clicked() {
             event.action = Some(Act::ClearTyped);
         }
     }
@@ -300,7 +300,7 @@ pub fn paint_toolbar(
             text_col,
         );
 
-        if resp.clicked() || (hovered && ui.input(|i| i.pointer.primary_pressed())) {
+        if resp.clicked() {
             event.action = Some(btn.act);
         }
     }

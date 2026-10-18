@@ -371,6 +371,7 @@ impl VKbdApp {
         self.toolbar_focused = false;
         self.toolbar_col = 0;
         self.cursor = (2, 4);
+        self.radial_selected_slice = None;
         self.key.release_all();
         if self.layer != Layer::Abc {
             self.layer = Layer::Abc;
@@ -828,10 +829,24 @@ impl VKbdApp {
         let (sx, sy) = (nav.stick_x, nav.stick_y);
         let d = (sx * sx + sy * sy).sqrt();
 
-        if d > 12000.0 {
+        let (rx, ry) = (nav.right_stick_x, nav.right_stick_y);
+        let d_r = (rx * rx + ry * ry).sqrt();
+
+        // Check left stick, then right stick, then D-pad discrete steps
+        let (active_x, active_y, has_dir) = if d > 10000.0 {
+            (sx, sy, true)
+        } else if d_r > 10000.0 {
+            (rx, ry, true)
+        } else if nav.dx != 0 || nav.dy != 0 {
+            (nav.dx as f32, -nav.dy as f32, true)
+        } else {
+            (0.0, 0.0, false)
+        };
+
+        if has_dir {
             let two_pi = std::f32::consts::PI * 2.0;
             let step = two_pi / 8.0;
-            let phi = (-sy).atan2(sx);
+            let phi = (-active_y).atan2(active_x);
             let mut theta = phi + std::f32::consts::FRAC_PI_2;
             while theta < 0.0 {
                 theta += two_pi;
@@ -841,16 +856,15 @@ impl VKbdApp {
             }
             let s = (((theta + step * 0.5) / step).floor() as usize) % 8;
             self.radial_selected_slice = Some(s);
-        } else {
-            self.radial_selected_slice = None;
         }
 
         if nav.select > 0 {
             if let Some(s) = self.radial_selected_slice {
                 self.trigger_radial_action(s);
-                // Slice 0 switches the overlay to the keyboard; every other
-                // slice is a one-shot action that closes the menu.
-                return s != 0;
+                // Slices 1 and 3 are Volume Up / Down: keep the menu open for continuous adjustment!
+                // Slice 0 switches the overlay to keyboard mode.
+                // Every other slice is a one-shot action that closes the menu.
+                return s != 0 && s != 1 && s != 3;
             }
         }
         if nav.close > 0 || nav.hide > 0 {
@@ -865,28 +879,36 @@ impl VKbdApp {
                 OVERLAY_MODE.store(0, Ordering::SeqCst);
                 self.mode = OverlayMode::Keyboard;
                 self.sized = (0.0, 0.0);
+                self.dirty = true;
             }
             1 => {
                 crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
                 self.tap_key(NavKey::VolumeUp);
+                crate::osd::trigger_volume_feedback();
             }
             2 => {
+                crate::platform::restore_foreground();
                 self.perform_in_context(Act::TaskView);
             }
             3 => {
                 crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
                 self.tap_key(NavKey::VolumeDown);
+                crate::osd::trigger_volume_feedback();
             }
             4 => {
+                crate::platform::restore_foreground();
                 self.perform_in_context(Act::ShowDesktop);
             }
             5 => {
+                crate::platform::restore_foreground();
                 self.perform_in_context(Act::Paste);
             }
             6 => {
+                crate::platform::restore_foreground();
                 self.perform_in_context(Act::CloseActiveWindow);
             }
             7 => {
+                crate::platform::restore_foreground();
                 crate::sound::play_sfx(crate::sound::SoundEffect::RadialSnap);
                 self.key.down(NavKey::LWin);
                 self.key.down(NavKey::LShift);
@@ -1271,10 +1293,18 @@ impl eframe::App for VKbdApp {
 
             if let Some(slice) = radial_choice {
                 self.trigger_radial_action(slice);
-                if slice != 0 {
+                if slice != 0 && slice != 1 && slice != 3 {
                     // One-shot actions and the centre "cancel" close the menu.
+                    platform::move_window(WINDOW_TITLE, -4000, -4000);
+                    self.shown = false;
+                    self.sized = (0.0, 0.0);
+                    VKBD_SHOWN.store(false, Ordering::SeqCst);
+                    self.warm_frames = 0;
                     self.visible.store(false, Ordering::SeqCst);
+                    self.reset_transient();
+                    crate::platform::trim_working_set();
                     ctx.request_repaint();
+                    return;
                 }
             }
             ctx.request_repaint_after(Duration::from_millis(30));

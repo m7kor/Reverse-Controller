@@ -707,6 +707,7 @@ const MA_NOACTIVATE: isize = 3;
 const SW_HIDE: i32 = 0;
 const SW_SHOWNOACTIVATE: i32 = 4;
 const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOMOVE: u32 = 0x0002;
 
 #[link(name = "user32")]
 extern "system" {
@@ -838,12 +839,12 @@ pub fn place_window(title: &str, x: i32, y: i32, w: i32, h: i32) -> bool {
         }
         SetWindowPos(
             hwnd,
-            std::ptr::null_mut(),
+            (-1isize) as HWND,
             x,
             y,
             w,
             h,
-            SWP_NOZORDER | SWP_NOACTIVATE | async_flag(hwnd),
+            SWP_NOACTIVATE | async_flag(hwnd),
         );
         true
     }
@@ -860,14 +861,19 @@ pub fn move_window(title: &str, x: i32, y: i32) -> bool {
         if hwnd.is_null() {
             return false;
         }
+        let (insert_after, flags) = if x < -2000 || y < -2000 {
+            (std::ptr::null_mut(), SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | async_flag(hwnd))
+        } else {
+            ((-1isize) as HWND, SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd))
+        };
         SetWindowPos(
             hwnd,
-            std::ptr::null_mut(),
+            insert_after,
             x,
             y,
             0,
             0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | async_flag(hwnd),
+            flags,
         );
         true
     }
@@ -964,6 +970,15 @@ pub fn set_window_visible(title: &str, visible: bool) -> bool {
             ShowWindow(hwnd, cmd);
         }
         if visible {
+            SetWindowPos(
+                hwnd,
+                (-1isize) as HWND,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
             InvalidateRect(hwnd, std::ptr::null(), 0);
         }
         true
@@ -997,16 +1012,15 @@ pub fn enforce_overlay_style(title: &str, backdrop: bool) -> bool {
             const SWP_FRAMECHANGED: u32 = 0x0020;
             const SWP_NOMOVE: u32 = 0x0002;
             const SWP_NOSIZE: u32 = 0x0001;
-            const SWP_NOZORDER: u32 = 0x0004;
             const SWP_NOACTIVATE: u32 = 0x0010;
             SetWindowPos(
                 hwnd,
-                std::ptr::null_mut(),
+                (-1isize) as HWND,
                 0,
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
         }
         // Enable Windows 11 immersive dark mode and rounded corner preference
@@ -1320,10 +1334,23 @@ pub fn restore_foreground() {
         return;
     }
     unsafe {
-        let fg = GetForegroundWindow() as usize;
+        let fg = GetForegroundWindow();
+        let fg_usize = fg as usize;
         let ov = overlay_hwnd();
-        if (fg == 0 || (ov != 0 && fg == ov) || fg != h) && IsWindow(h as HWND) != 0 {
+        if (fg_usize == 0 || (ov != 0 && fg_usize == ov) || fg_usize != h) && IsWindow(h as HWND) != 0 {
+            let cur_thread = GetCurrentThreadId();
+            let fg_thread = if !fg.is_null() {
+                GetWindowThreadProcessId(fg, std::ptr::null_mut())
+            } else {
+                0
+            };
+            if cur_thread != 0 && fg_thread != 0 && cur_thread != fg_thread {
+                AttachThreadInput(cur_thread, fg_thread, 1);
+            }
             SetForegroundWindow(h as HWND);
+            if cur_thread != 0 && fg_thread != 0 && cur_thread != fg_thread {
+                AttachThreadInput(cur_thread, fg_thread, 0);
+            }
         }
     }
 }
@@ -1334,12 +1361,25 @@ pub fn set_foreground_window_force(hwnd: usize) {
         return;
     }
     unsafe {
-        let cur = GetForegroundWindow() as usize;
-        if cur == hwnd {
+        let cur = GetForegroundWindow();
+        let cur_usize = cur as usize;
+        if cur_usize == hwnd {
             return;
         }
         if IsWindow(hwnd as HWND) != 0 {
+            let cur_thread = GetCurrentThreadId();
+            let fg_thread = if !cur.is_null() {
+                GetWindowThreadProcessId(cur, std::ptr::null_mut())
+            } else {
+                0
+            };
+            if cur_thread != 0 && fg_thread != 0 && cur_thread != fg_thread {
+                AttachThreadInput(cur_thread, fg_thread, 1);
+            }
             SetForegroundWindow(hwnd as HWND);
+            if cur_thread != 0 && fg_thread != 0 && cur_thread != fg_thread {
+                AttachThreadInput(cur_thread, fg_thread, 0);
+            }
         }
     }
 }
@@ -1401,6 +1441,7 @@ static FOREGROUND_FOCUS: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 extern "system" {
     fn IsWindow(hwnd: HWND) -> BOOL;
     fn SetForegroundWindow(hwnd: HWND) -> BOOL;
+    fn AttachThreadInput(id_attach: DWORD, id_attach_to: DWORD, f_attach: BOOL) -> BOOL;
 }
 
 /// Heuristic: is a text caret (insertion point) currently active on the
@@ -1557,33 +1598,37 @@ fn to_wide(s: &str) -> Vec<u16> {
 /// Setting `Enabled` = 0 ensures full mouse cursor control is always available everywhere.
 pub fn disable_windows_gamepad_navigation() {
     unsafe {
+        const KEY_WOW64_64KEY: DWORD = 0x0100;
+        const KEY_WOW64_32KEY: DWORD = 0x0200;
         for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
-            let subkey = to_wide("SOFTWARE\\Microsoft\\Input\\Settings\\ControllerProcessor\\ControllerToVKMapping");
-            let mut hkey: HKEY = std::ptr::null_mut();
-            let mut disp: DWORD = 0;
-            let status = RegCreateKeyExW(
-                root,
-                subkey.as_ptr(),
-                0,
-                std::ptr::null_mut(),
-                0,
-                KEY_WRITE,
-                std::ptr::null_mut(),
-                &mut hkey,
-                &mut disp,
-            );
-            if status == ERROR_SUCCESS && !hkey.is_null() {
-                let val_name = to_wide("Enabled");
-                let data: u32 = 0;
-                RegSetValueExW(
-                    hkey,
-                    val_name.as_ptr(),
+            for access_flag in [0, KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+                let subkey = to_wide("SOFTWARE\\Microsoft\\Input\\Settings\\ControllerProcessor\\ControllerToVKMapping");
+                let mut hkey: HKEY = std::ptr::null_mut();
+                let mut disp: DWORD = 0;
+                let status = RegCreateKeyExW(
+                    root,
+                    subkey.as_ptr(),
                     0,
-                    REG_DWORD,
-                    &data as *const u32 as *const u8,
-                    4,
+                    std::ptr::null_mut(),
+                    0,
+                    KEY_WRITE | access_flag,
+                    std::ptr::null_mut(),
+                    &mut hkey,
+                    &mut disp,
                 );
-                RegCloseKey(hkey);
+                if status == ERROR_SUCCESS && !hkey.is_null() {
+                    let val_name = to_wide("Enabled");
+                    let data: u32 = 0;
+                    RegSetValueExW(
+                        hkey,
+                        val_name.as_ptr(),
+                        0,
+                        REG_DWORD,
+                        &data as *const u32 as *const u8,
+                        4,
+                    );
+                    RegCloseKey(hkey);
+                }
             }
         }
     }
@@ -1718,6 +1763,16 @@ fn compute_task_switcher() -> bool {
         let hwnd = GetForegroundWindow();
         if hwnd.is_null() {
             return false;
+        }
+        if let Some(exe) = foreground_process_name() {
+            let lower = exe.to_lowercase();
+            if lower == "startmenuexperiencehost.exe"
+                || lower == "searchhost.exe"
+                || lower == "shellexperiencehost.exe"
+                || lower == "explorer.exe"
+            {
+                return false;
+            }
         }
         let mut class_buf = [0u16; 128];
         let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32);

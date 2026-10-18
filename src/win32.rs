@@ -277,7 +277,18 @@ pub fn send_inputs(inputs: &[INPUT]) -> u32 {
 }
 
 pub fn map_vk_to_scancode(vk: u16) -> u16 {
-    unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 }
+    let generic_vk = match vk {
+        0xA0 | 0xA1 => 0x10, // VK_SHIFT
+        0xA2 | 0xA3 => 0x11, // VK_CONTROL
+        0xA4 | 0xA5 => 0x12, // VK_MENU
+        other => other,
+    };
+    let scan = unsafe { MapVirtualKeyW(generic_vk as u32, MAPVK_VK_TO_VSC) as u16 };
+    if scan != 0 {
+        scan
+    } else {
+        unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 }
+    }
 }
 
 pub fn async_key_down(vk: i32) -> bool {

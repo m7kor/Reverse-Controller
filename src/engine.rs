@@ -1200,11 +1200,11 @@ impl Engine {
                 .as_ref()
                 .and_then(|n| n.lock().ok().map(|n| (n.is_repositioning, n.split_mode, n.radial_active)))
                 .unwrap_or((false, false, false));
-            self.feed_nav(&gp, dt, split);
+            self.feed_nav(&gp, dt, split, radial);
 
             // While the keyboard is visible the pointer and wheel keep working,
             // except where a stick has been given to the overlay: both sticks
-            // steer the split keyboard, the left stick steers the radial menu,
+            // steer the split keyboard, the left and right sticks steer the radial menu,
             // and the right stick moves the keyboard in move mode.
             let left = std::mem::take(&mut self.left_stick);
             let left_axes = if split || radial { (0.0, 0.0) } else { (lx, ly) };
@@ -1212,7 +1212,7 @@ impl Engine {
             self.left_stick = left;
 
             let right = std::mem::take(&mut self.right_stick);
-            let right_axes = if split || repositioning { (0.0, 0.0) } else { (rx, ry) };
+            let right_axes = if split || repositioning || radial { (0.0, 0.0) } else { (rx, ry) };
             self.update_stick(&right, right_axes, now, dt, false);
             self.right_stick = right;
             return;
@@ -1807,7 +1807,7 @@ impl Engine {
 
     /// Feed controller input to the virtual keyboard while it is visible.
     /// The engine is in "keyboard mode": no normal bindings run this frame.
-    fn feed_nav(&mut self, gp: &w32::XINPUT_GAMEPAD, dt: f64, split: bool) {
+    fn feed_nav(&mut self, gp: &w32::XINPUT_GAMEPAD, dt: f64, split: bool, radial: bool) {
         let b = gp.wButtons;
         let newly = b & !self.nav_prev_buttons;
         const STICK_TH: i16 = 16000;
@@ -1830,9 +1830,9 @@ impl Engine {
             || (gp.sThumbRY as i32).abs() > MOUSE_STICK_DEADZONE
             || physical_mouse_moved;
 
-        if split || dpad_moving {
-            // Split mode always shows both cursors: the sticks never drive the
-            // pointer there, so they cannot mean "the user went back to the mouse".
+        if split || radial || dpad_moving {
+            // Split mode always shows both cursors, radial mode navigates the pie menu:
+            // the sticks never drive the pointer there, so they cannot mean "the user went back to the mouse".
             self.nav_grid_active = true;
         } else if mouse_moving {
             self.nav_grid_active = false;
@@ -1916,6 +1916,8 @@ impl Engine {
             if let Ok(mut nav) = nav_arc.lock() {
                 nav.stick_x = gp.sThumbLX as f32;
                 nav.stick_y = gp.sThumbLY as f32;
+                nav.right_stick_x = gp.sThumbRX as f32;
+                nav.right_stick_y = gp.sThumbRY as f32;
                 if step {
                     nav.dx += dx;
                     nav.dy += dy;
@@ -1926,15 +1928,15 @@ impl Engine {
                 }
                 // Two-way sync: if GUI or pointer interaction set grid_nav_active to false,
                 // and user is not actively pressing D-pad, sync Engine state to false!
-                if !nav.grid_nav_active && !dpad_moving && !split {
+                if !nav.grid_nav_active && !dpad_moving && !split && !radial {
                     self.nav_grid_active = false;
                 }
                 nav.grid_nav_active = self.nav_grid_active;
                 // Face buttons, mapped from the original `GetKeyboardModeBindings`:
-                // If D-pad navigation is active: Button A selects the highlighted grid key.
+                // If D-pad navigation or Radial mode is active: Button A selects the highlighted key/slice.
                 // If mouse pointer is being used: Button A sends native mouse left-click!
                 if newly & B_A != 0 {
-                    if self.nav_grid_active {
+                    if self.nav_grid_active || radial {
                         nav.select += 1;
                     } else {
                         crate::platform::note_controller_left_click();
@@ -2048,6 +2050,9 @@ impl Engine {
                     if rt_edge {
                         nav.shift += 1;
                     }
+                }
+                if radial && (rt_edge || (newly & B_RIGHT_SHOULDER != 0)) {
+                    nav.select += 1;
                 }
 
                 // Start types Enter, or Shift+Enter if RT (Shift trigger) is held!

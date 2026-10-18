@@ -34,8 +34,8 @@ pub fn paint_radial_menu(
     );
     painter.circle_stroke(center, 202.0, egui::Stroke::new(1.5, C_PANEL_BORDER));
 
-    // Pointer detection
-    let ptr = ui.input(|i| i.pointer.hover_pos());
+    let response = ui.allocate_rect(area, egui::Sense::click());
+    let ptr = response.hover_pos().or_else(|| ui.input(|i| i.pointer.hover_pos()));
     let mut hovered_slice = None;
     let mut hovered_center = false;
     if let Some(pos) = ptr {
@@ -58,11 +58,11 @@ pub fn paint_radial_menu(
         }
     }
 
-    let clicked = ui.input(|i| i.pointer.primary_clicked());
+    let clicked = response.clicked() || ui.input(|i| i.pointer.primary_clicked());
     if clicked {
         if hovered_center {
             chosen_slice = Some(8); // Cancel
-        } else if let Some(s) = hovered_slice {
+        } else if let Some(s) = hovered_slice.or(selected_slice) {
             chosen_slice = Some(s);
         }
     }
