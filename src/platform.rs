@@ -232,6 +232,7 @@ const EDIT_CLASSES: &[&str] = &[
 /// Was the last left-click inside a text input? Updated by a low-level mouse
 /// hook installed by [`mouse_watch_start`].
 static CLICK_IN_TEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CLICK_WAS_IBEAM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LAST_LCLICK_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static LAST_CONTROLLER_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static LAST_CLICK_WAS_CONTROLLER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -284,6 +285,7 @@ pub fn note_controller_left_click() {
     LAST_CLICK_WAS_CONTROLLER.store(true, std::sync::atomic::Ordering::SeqCst);
     CONTROLLER_LBUTTON_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
     IS_DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
+    CLICK_WAS_IBEAM.store(is_cursor_ibeam(), std::sync::atomic::Ordering::SeqCst);
     push_foreground();
     // Only remember where the click landed. Deciding whether that is a text
     // box can mean a cross-process accessibility query, which blocks while
@@ -326,6 +328,7 @@ pub fn check_controller_drag() {
                     if dx > 8 || dy > 8 {
                         IS_DRAGGING.store(true, std::sync::atomic::Ordering::SeqCst);
                         CLICK_IN_TEXT.store(false, std::sync::atomic::Ordering::SeqCst);
+                        CLICK_WAS_IBEAM.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
@@ -343,11 +346,12 @@ static PENDING_CLICK: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::n
 /// Classify a pending controller click (call from a background thread).
 fn classify_pending_click() {
     let pending = PENDING_CLICK.lock().ok().and_then(|mut p| p.take());
+    let was_ibeam = CLICK_WAS_IBEAM.swap(false, std::sync::atomic::Ordering::SeqCst);
     if is_controller_dragging() {
         return;
     }
     if let Some((x, y)) = pending {
-        if point_is_text_field(POINT { x, y }) {
+        if point_is_text_field(POINT { x, y }, was_ibeam) {
             CLICK_IN_TEXT.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -433,6 +437,39 @@ extern "system" {
 extern "system" {
     fn DeleteObject(ho: *mut c_void) -> BOOL;
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GUID {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    fn CoCreateInstance(
+        rclsid: *const GUID,
+        pUnkOuter: *mut c_void,
+        dwClsContext: u32,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> i32;
+}
+
+const CLSID_CUIAutomation: GUID = GUID {
+    data1: 0xff48dba4,
+    data2: 0x60ef,
+    data3: 0x4201,
+    data4: [0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e],
+};
+const IID_IUnknown: GUID = GUID {
+    data1: 0x00000000,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
 
 /// Is the pointer showing the hand cursor (a link or button in browsers,
 /// Electron apps and many modern programs)? Reading the cursor shape is a
@@ -560,9 +597,123 @@ pub fn check_accessible_text(pt: POINT) -> bool {
 }
 
 
+unsafe fn inspect_uia_element(el: *mut c_void) -> Option<bool> {
+    if el.is_null() {
+        return None;
+    }
+    let el_vtable = *(el as *mut *mut usize);
+    let get_ct_fn: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32 =
+        std::mem::transmute(*el_vtable.add(21));
+    let mut ct = 0i32;
+    if get_ct_fn(el, &mut ct) != 0 {
+        return None;
+    }
+
+    // 50004 = UIA_EditControlTypeId, 50003 = UIA_ComboBoxControlTypeId
+    if ct == 50004 || ct == 50003 {
+        // Query ValuePattern (10002) to check if read-only
+        let get_pattern_fn: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> i32 =
+            std::mem::transmute(*el_vtable.add(16));
+        let mut val_pat: *mut c_void = std::ptr::null_mut();
+        let mut is_ro = 0i32;
+        if get_pattern_fn(el, 10002, &mut val_pat) == 0 && !val_pat.is_null() {
+            let pat_vtable = *(val_pat as *mut *mut usize);
+            let pat_release: unsafe extern "system" fn(*mut c_void) -> u32 =
+                std::mem::transmute(*pat_vtable.add(2));
+            let get_ro_fn: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32 =
+                std::mem::transmute(*pat_vtable.add(5));
+            let _ = get_ro_fn(val_pat, &mut is_ro);
+            pat_release(val_pat);
+        }
+        if is_ro == 0 {
+            return Some(true);
+        } else {
+            return Some(false);
+        }
+    }
+
+    // Explicit non-text targets to reject:
+    // 50020 = UIA_TextControlTypeId (Static Text / Labels)
+    // 50000 = UIA_ButtonControlTypeId
+    // 50002 = UIA_CheckBoxControlTypeId
+    // 50005 = UIA_HyperlinkControlTypeId
+    // 50006 = UIA_ImageControlTypeId
+    // 50008 = UIA_ListControlTypeId
+    // 50013 = UIA_RadioButtonControlTypeId
+    // 50014 = UIA_ScrollBarControlTypeId
+    if ct == 50020
+        || ct == 50000
+        || ct == 50002
+        || ct == 50005
+        || ct == 50006
+        || ct == 50008
+        || ct == 50013
+        || ct == 50014
+    {
+        return Some(false);
+    }
+
+    None
+}
+
+/// Query Windows UI Automation (UIA) at `pt` or focused element.
+/// Works across WinUI 3, XAML, modern Windows Settings / Start Menu, and Chromium apps.
+pub fn check_uia_text(pt: POINT) -> Option<bool> {
+    unsafe {
+        let mut uia: *mut c_void = std::ptr::null_mut();
+        let hr = CoCreateInstance(
+            &CLSID_CUIAutomation,
+            std::ptr::null_mut(),
+            1, // CLSCTX_INPROC_SERVER
+            &IID_IUnknown,
+            &mut uia,
+        );
+        if hr != 0 || uia.is_null() {
+            return None;
+        }
+
+        let uia_vtable = *(uia as *mut *mut usize);
+        let uia_release: unsafe extern "system" fn(*mut c_void) -> u32 =
+            std::mem::transmute(*uia_vtable.add(2));
+        let el_from_pt_fn: unsafe extern "system" fn(*mut c_void, POINT, *mut *mut c_void) -> i32 =
+            std::mem::transmute(*uia_vtable.add(7));
+        let get_focused_fn: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32 =
+            std::mem::transmute(*uia_vtable.add(8));
+
+        let mut result: Option<bool> = None;
+
+        // 1. Element directly under point
+        let mut el_pt: *mut c_void = std::ptr::null_mut();
+        if el_from_pt_fn(uia, pt, &mut el_pt) == 0 && !el_pt.is_null() {
+            let el_vtable = *(el_pt as *mut *mut usize);
+            let el_release: unsafe extern "system" fn(*mut c_void) -> u32 =
+                std::mem::transmute(*el_vtable.add(2));
+            result = inspect_uia_element(el_pt);
+            el_release(el_pt);
+        }
+
+        // 2. If element under point was inconclusive, check whether focused element is text box
+        if result.is_none() {
+            let mut el_foc: *mut c_void = std::ptr::null_mut();
+            if get_focused_fn(uia, &mut el_foc) == 0 && !el_foc.is_null() {
+                let el_vtable = *(el_foc as *mut *mut usize);
+                let el_release: unsafe extern "system" fn(*mut c_void) -> u32 =
+                    std::mem::transmute(*el_vtable.add(2));
+                if let Some(true) = inspect_uia_element(el_foc) {
+                    result = Some(true);
+                }
+                el_release(el_foc);
+            }
+        }
+
+        uia_release(uia);
+        result
+    }
+}
+
 /// Decide whether a click at `pt` landed on something that accepts typed text.
 /// Avoids false positives from static text hover, read-only labels, or window backgrounds.
-fn point_is_text_field(pt: POINT) -> bool {
+fn point_is_text_field(pt: POINT, was_ibeam: bool) -> bool {
     unsafe {
         let under = WindowFromPoint(pt);
         if under.is_null() {
@@ -579,7 +730,7 @@ fn point_is_text_field(pt: POINT) -> bool {
         }
 
         // 1. If click lands inside Windows Taskbar or Desktop (or any of their child controls),
-        // check whether search box is active.
+        // strictly require UI Automation or MSAA to verify an editable search field.
         let mut cur = under;
         let mut is_shell = false;
         while !cur.is_null() {
@@ -605,6 +756,9 @@ fn point_is_text_field(pt: POINT) -> bool {
             cur = parent;
         }
         if is_shell {
+            if let Some(is_text) = check_uia_text(pt) {
+                return is_text;
+            }
             return check_accessible_text(pt);
         }
     }
@@ -619,6 +773,9 @@ fn point_is_text_field(pt: POINT) -> bool {
         || class_name == "ShellTabWindowClass"
         || class_name == "XamlExplorerHostIslandWindow"
     {
+        if let Some(is_text) = check_uia_text(pt) {
+            return is_text;
+        }
         return check_accessible_text(pt);
     }
 
@@ -636,12 +793,17 @@ fn point_is_text_field(pt: POINT) -> bool {
         return true;
     }
 
-    // 4. Query MSAA to catch modern WinUI/XAML (Settings search, Start Menu search), Chrome, Discord, Edge, etc.
+    // 4. Query UI Automation (UIA) - Catches WinUI 3, XAML, Settings search, Start Menu, Chrome, Edge, Discord
+    if let Some(is_text) = check_uia_text(pt) {
+        return is_text;
+    }
+
+    // 5. Query MSAA fallback
     if check_accessible_text(pt) {
         return true;
     }
 
-    // 5. Blinking text insertion caret on foreground thread belonging to clicked window
+    // 6. Blinking text insertion caret on foreground thread belonging to clicked window
     unsafe {
         let mut gi: GUITHREADINFO = std::mem::zeroed();
         gi.cbSize = std::mem::size_of::<GUITHREADINFO>() as DWORD;
@@ -659,6 +821,13 @@ fn point_is_text_field(pt: POINT) -> bool {
                 }
             }
         }
+    }
+
+    // 7. Cursor shape fallback:
+    // If user clicked inside an application window (not shell, not taskbar, not file list,
+    // and not rejected by UIA as button/label) and cursor at click was I-beam, it is a text input.
+    if was_ibeam || is_cursor_ibeam() {
+        return true;
     }
 
     false
@@ -2459,5 +2628,17 @@ mod hotkey_tests {
         classify_pending_click();
         assert!(!take_text_click(), "dragging must suppress text click");
         IS_DRAGGING.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn uia_text_check_smoke_test() {
+        com_init_thread();
+        let pt = POINT { x: 100, y: 100 };
+        let _ = check_uia_text(pt);
+    }
+
+    #[test]
+    fn test_point_is_text_field_ibeam_fallback() {
+        assert!(!point_is_text_field(POINT { x: -9999, y: -9999 }, false));
     }
 }
