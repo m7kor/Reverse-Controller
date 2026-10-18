@@ -275,7 +275,6 @@ pub fn clear_last_click() {
 static CONTROLLER_LBUTTON_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static CLICK_START_POS: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
 static IS_DRAGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static CLICK_WAS_IBEAM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Record a controller left-click natively in-process. Inspects text-box status
 /// immediately without any low-level OS mouse hooks.
@@ -285,7 +284,6 @@ pub fn note_controller_left_click() {
     LAST_CLICK_WAS_CONTROLLER.store(true, std::sync::atomic::Ordering::SeqCst);
     CONTROLLER_LBUTTON_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
     IS_DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
-    CLICK_WAS_IBEAM.store(is_cursor_ibeam(), std::sync::atomic::Ordering::SeqCst);
     push_foreground();
     // Only remember where the click landed. Deciding whether that is a text
     // box can mean a cross-process accessibility query, which blocks while
@@ -328,7 +326,6 @@ pub fn check_controller_drag() {
                     if dx > 8 || dy > 8 {
                         IS_DRAGGING.store(true, std::sync::atomic::Ordering::SeqCst);
                         CLICK_IN_TEXT.store(false, std::sync::atomic::Ordering::SeqCst);
-                        CLICK_WAS_IBEAM.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
@@ -346,16 +343,13 @@ static PENDING_CLICK: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::n
 /// Classify a pending controller click (call from a background thread).
 fn classify_pending_click() {
     let pending = PENDING_CLICK.lock().ok().and_then(|mut p| p.take());
-    let was_ibeam = CLICK_WAS_IBEAM.swap(false, std::sync::atomic::Ordering::SeqCst);
     if is_controller_dragging() {
         return;
     }
     if let Some((x, y)) = pending {
-        if was_ibeam || point_is_text_field(POINT { x, y }) {
+        if point_is_text_field(POINT { x, y }) {
             CLICK_IN_TEXT.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-    } else if was_ibeam {
-        CLICK_IN_TEXT.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -548,9 +542,9 @@ pub fn check_accessible_text(pt: POINT) -> bool {
                     0
                 };
 
-                // STATE_SYSTEM_READONLY is 0x00000040.
-                // If it is read-only, it is a static label, file name, or desktop icon - NOT an editable field!
-                if state & 0x40 != 0 {
+                // STATE_SYSTEM_READONLY is 0x00000040. STATE_SYSTEM_UNAVAILABLE is 0x00000001.
+                // If it is read-only or unavailable, it is a static label, article text, or disabled field!
+                if (state & 0x40 != 0) || (state & 0x01 != 0) {
                     return false;
                 }
 
@@ -567,21 +561,15 @@ pub fn check_accessible_text(pt: POINT) -> bool {
 
 
 /// Decide whether a click at `pt` landed on something that accepts typed text.
-/// Avoids slow cross-process COM (`AccessibleObjectFromPoint`) or false-positive
-/// I-Beam checks inside the low-level mouse hook.
+/// Avoids false positives from static text hover, read-only labels, or window backgrounds.
 fn point_is_text_field(pt: POINT) -> bool {
-    // 1. If pointer is an I-Beam, it is unequivocally an editable text area!
-    if is_cursor_ibeam() {
-        return true;
-    }
-
     unsafe {
         let under = WindowFromPoint(pt);
         if under.is_null() {
             return false;
         }
         let ov = overlay_hwnd() as HWND;
-        if !ov.is_null() && (under == ov || GetParent(under) == ov) {
+        if !ov.is_null() && (under == ov || GetAncestor(under, GA_ROOT) == ov || GetParent(under) == ov) {
             return false;
         }
         let mut pid: DWORD = 0;
@@ -590,8 +578,8 @@ fn point_is_text_field(pt: POINT) -> bool {
             return false;
         }
 
-        // 2. If click lands inside Windows Taskbar or Desktop (or any of their child controls),
-        // check whether search box or focused caret is active.
+        // 1. If click lands inside Windows Taskbar or Desktop (or any of their child controls),
+        // check whether search box is active.
         let mut cur = under;
         let mut is_shell = false;
         while !cur.is_null() {
@@ -617,40 +605,63 @@ fn point_is_text_field(pt: POINT) -> bool {
             cur = parent;
         }
         if is_shell {
-            return caret_active() || check_accessible_text(pt);
+            return check_accessible_text(pt);
         }
     }
 
     let class = window_class_at(pt);
     let class_name = class.as_deref().unwrap_or("");
 
-    // 3. If click lands inside Explorer file list, it's selecting files unless rename edit box is open.
+    // 2. If click lands inside Explorer file list, it's selecting files unless search or rename edit box is open.
     if class_name == "SysListView32"
         || class_name == "SHELLDLL_DefView"
         || class_name == "CabinetWClass"
         || class_name == "ShellTabWindowClass"
         || class_name == "XamlExplorerHostIslandWindow"
     {
-        return caret_active() || check_accessible_text(pt);
+        return check_accessible_text(pt);
     }
 
-    // 4. Known native edit class.
+    // 3. Known native edit class (must not have ES_READONLY style).
     if EDIT_CLASSES.iter().any(|e| class_name.starts_with(e)) {
+        unsafe {
+            let under = WindowFromPoint(pt);
+            if !under.is_null() {
+                let style = GetWindowLongPtrW(under, -16) as u32; // GWL_STYLE
+                if style & 0x0800 != 0 { // ES_READONLY
+                    return false;
+                }
+            }
+        }
         return true;
     }
 
-    // 5. A real caret on the foreground thread.
-    if caret_active() {
+    // 4. Query MSAA to catch modern WinUI/XAML (Settings search, Start Menu search), Chrome, Discord, Edge, etc.
+    if check_accessible_text(pt) {
         return true;
     }
 
-    // 6. Modern Chromium / Electron / WinUI focused control under cursor.
-    if focused_window_under_cursor() {
-        return true;
+    // 5. Blinking text insertion caret on foreground thread belonging to clicked window
+    unsafe {
+        let mut gi: GUITHREADINFO = std::mem::zeroed();
+        gi.cbSize = std::mem::size_of::<GUITHREADINFO>() as DWORD;
+        if GetGUIThreadInfo(0, &mut gi) != 0 && !gi.hwndCaret.is_null() {
+            let under = WindowFromPoint(pt);
+            if !under.is_null() {
+                let under_root = GetAncestor(under, GA_ROOT);
+                let caret_root = GetAncestor(gi.hwndCaret, GA_ROOT);
+                if under == gi.hwndCaret || under_root == caret_root {
+                    let cw = (gi.rcCaret.right - gi.rcCaret.left).abs();
+                    let ch = (gi.rcCaret.bottom - gi.rcCaret.top).abs();
+                    if cw > 0 && ch > 0 {
+                        return true;
+                    }
+                }
+            }
+        }
     }
 
-    // 7. Query MSAA to catch modern WinUI/XAML (Settings search, Start Menu search), Chrome, Discord, etc.
-    check_accessible_text(pt)
+    false
 }
 
 /// Is the currently focused window sitting under the cursor?
@@ -2429,5 +2440,24 @@ mod hotkey_tests {
         HOTKEY_FIRED.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(take_hotkey(), "first read must report the press");
         assert!(!take_hotkey(), "second read must report nothing");
+    }
+
+    #[test]
+    fn text_click_defers_consumption_while_lbutton_down() {
+        use std::sync::atomic::Ordering;
+        // Holding left button must defer classification until button is released
+        CONTROLLER_LBUTTON_DOWN.store(true, Ordering::SeqCst);
+        assert!(!take_text_click(), "must not consume text click while button is held");
+        CONTROLLER_LBUTTON_DOWN.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn drag_cancels_text_click() {
+        use std::sync::atomic::Ordering;
+        IS_DRAGGING.store(true, Ordering::SeqCst);
+        CONTROLLER_LBUTTON_DOWN.store(false, Ordering::SeqCst);
+        classify_pending_click();
+        assert!(!take_text_click(), "dragging must suppress text click");
+        IS_DRAGGING.store(false, Ordering::SeqCst);
     }
 }
