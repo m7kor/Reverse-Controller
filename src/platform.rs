@@ -896,11 +896,10 @@ pub fn is_fullscreen() -> bool {
             return false;
         }
         let m = mi.rcMonitor;
-        const TOLERANCE: i32 = 12;
-        (rc.left <= m.left + TOLERANCE)
-            && (rc.top <= m.top + TOLERANCE)
-            && (rc.right >= m.right - TOLERANCE)
-            && (rc.bottom >= m.bottom - TOLERANCE)
+        (rc.right - rc.left) == (m.right - m.left)
+            && (rc.bottom - rc.top) == (m.bottom - m.top)
+            && rc.top == m.top
+            && rc.left == m.left
     }
 }
 
@@ -1629,17 +1628,13 @@ extern "system" {
     fn SHQueryUserNotificationState(pquns: *mut i32) -> i32;
 }
 
-const QUNS_BUSY: i32 = 2;
 const QUNS_RUNNING_D3D_FULL_SCREEN: i32 = 3;
-const QUNS_APP: i32 = 7;
 
 fn compute_fullscreen() -> bool {
-    // Method 1: Exclusive D3D or Modern DirectX / Vulkan / Store full-screen app
-    // (SHQueryUserNotificationState).
+    // Method 1: Exclusive D3D fullscreen (SHQueryUserNotificationState).
     let d3d_fs = unsafe {
         let mut state: i32 = 0;
-        SHQueryUserNotificationState(&mut state) == 0
-            && (state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_APP || state == QUNS_BUSY)
+        SHQueryUserNotificationState(&mut state) == 0 && state == QUNS_RUNNING_D3D_FULL_SCREEN
     };
     if d3d_fs {
         return true;
