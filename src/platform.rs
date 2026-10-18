@@ -1692,6 +1692,53 @@ pub fn foreground_process_name() -> Option<String> {
     }
 }
 
+/// Returns the screen rectangle (left, top, right, bottom) of the foreground window.
+pub fn foreground_window_rect() -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut rc: RECT = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut rc) == 0 {
+            return None;
+        }
+        Some((rc.left, rc.top, rc.right, rc.bottom))
+    }
+}
+
+/// Check if the foreground window is a system shell flyout (Windows 11 Start Menu,
+/// SearchHost, ShellExperienceHost, TextInputHost) which DWM renders in a higher Z-band.
+pub fn is_system_shell_foreground() -> bool {
+    if let Some(exe) = foreground_process_name() {
+        let exe_lower = exe.to_lowercase();
+        if exe_lower == "startmenuexperiencehost.exe"
+            || exe_lower == "searchhost.exe"
+            || exe_lower == "shellexperiencehost.exe"
+            || exe_lower == "textinputhost.exe"
+        {
+            return true;
+        }
+    }
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if !hwnd.is_null() {
+            let mut buf = [0u16; 128];
+            let len = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if len > 0 {
+                let class_name = String::from_utf16_lossy(&buf[..len as usize]);
+                if class_name == "Windows.UI.Core.CoreWindow"
+                    || class_name == "Xaml_WindowedPopupClass"
+                    || class_name == "TopLevelWindowForOverflowXamlIsland"
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// [`foreground_process_name`], cached for ~250ms so the 125Hz loop can ask
 /// every frame without opening a process handle each time.
 pub fn foreground_process_name_cached() -> Option<String> {

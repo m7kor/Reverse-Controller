@@ -77,7 +77,7 @@ fn note_last_position(pos: (i32, i32)) {
 /// Where the keyboard opens: the remembered spot (kept on its own monitor) or
 /// the configured edge of the monitor the user is working on.
 pub fn opening_origin(prefs: &crate::config::KeyboardPrefs, remembered: Option<(i32, i32)>) -> (i32, i32) {
-    match remembered.filter(|_| prefs.remember_position) {
+    let base = match remembered.filter(|_| prefs.remember_position) {
         Some((x, y)) => {
             let (w, h) = prefs.window_size();
             let area = platform::work_area_at(x + w as i32 / 2, y + h as i32 / 2);
@@ -85,7 +85,29 @@ pub fn opening_origin(prefs: &crate::config::KeyboardPrefs, remembered: Option<(
                 .anchor(area, Some((x, y)))
         }
         None => prefs.anchor(platform::work_area_active(), None),
+    };
+    if platform::is_system_shell_foreground() {
+        if let Some((fl, ft, fr, fb)) = platform::foreground_window_rect() {
+            let (w, h) = prefs.window_size();
+            let (wx, wy, ww, wh) = platform::work_area_active();
+            let kw = w.round() as i32;
+            let kh = h.round() as i32;
+            let (bx, by) = base;
+            if bx < fr && (bx + kw) > fl && by < fb && (by + kh) > ft {
+                let right_space = (wx + ww) - fr;
+                let left_space = fl - wx;
+                let pad = 16;
+                if right_space >= kw + pad {
+                    return ((wx + ww - kw - pad).max(fr + 12), (wy + wh - kh - pad).clamp(wy, wy + wh - kh));
+                } else if left_space >= kw + pad {
+                    return (wx + pad, (wy + wh - kh - pad).clamp(wy, wy + wh - kh));
+                } else {
+                    return ((wx + (ww - kw) / 2).clamp(wx, (wx + ww - kw).max(wx)), (wy + pad).clamp(wy, (wy + wh - kh).max(wy)));
+                }
+            }
+        }
     }
+    base
 }
 
 /// Show the on-screen keyboard at its preferred size and place.
@@ -248,6 +270,7 @@ pub struct VKbdApp {
     reposition_ry: f32,
     last_mouse_down_pos: Option<egui::Pos2>,
     grid_nav_active: bool,
+    last_placed_pos: Option<(i32, i32)>,
     running: Arc<AtomicBool>,
 }
 
@@ -319,6 +342,7 @@ impl VKbdApp {
             reposition_ry: 0.0,
             last_mouse_down_pos: None,
             grid_nav_active: false,
+            last_placed_pos: None,
             running,
         }
     }
@@ -842,7 +866,7 @@ impl VKbdApp {
         VKBD_SHOWN.store(true, Ordering::SeqCst);
         if let Ok(mut g) = self.nav.lock() {
             g.radial_active = false;
-            g.grid_nav_active = true;
+            g.grid_nav_active = false;
             g.select = 0;
         }
         ctx.request_repaint();
@@ -1381,8 +1405,11 @@ impl eframe::App for VKbdApp {
         let max_x = (wx as f32 + sw - want.0).max(wx as f32);
         let max_y = (wy as f32 + sh - want.1).max(wy as f32);
 
-        let origin = match (self.window_pos, self.drag_anchor.is_some()) {
-            (Some(p), _) if self.prefs.remember_position || self.repositioning => {
+        let is_shell = platform::is_system_shell_foreground();
+        let shell_rect = if is_shell { platform::foreground_window_rect() } else { None };
+
+        let base_origin = match (self.window_pos, self.drag_anchor.is_some()) {
+            (Some(p), _) if (self.prefs.remember_position || self.repositioning) && !is_shell => {
                 let min_x = wx as f32;
                 let min_y = wy as f32;
                 (
@@ -1413,6 +1440,43 @@ impl eframe::App for VKbdApp {
             }
         };
 
+        // If a system shell flyout (Windows 11 Start Menu, Search flyout) is active,
+        // DWM enforces that the shell sits in a higher system Z-band above all user-space windows.
+        // Prevent the keyboard from being covered by docking to the open area!
+        let origin = if let Some((fl, ft, fr, fb)) = shell_rect {
+            let kw = want.0.round() as i32;
+            let kh = want.1.round() as i32;
+            let (bx, by) = base_origin;
+            let overlaps_x = bx < fr && (bx + kw) > fl;
+            let overlaps_y = by < fb && (by + kh) > ft;
+
+            if overlaps_x && overlaps_y {
+                let right_space = (wx + ww) - fr;
+                let left_space = fl - wx;
+                let pad = 16;
+                if right_space >= kw + pad {
+                    // Start Menu / Search is on the left: dock cleanly to the right side!
+                    let target_x = (wx + ww - kw - pad).max(fr + 12);
+                    let target_y = (wy + wh - kh - pad).clamp(wy, wy + wh - kh);
+                    (target_x, target_y)
+                } else if left_space >= kw + pad {
+                    // Flyout is on the right: dock cleanly to the left side!
+                    let target_x = wx + pad;
+                    let target_y = (wy + wh - kh - pad).clamp(wy, wy + wh - kh);
+                    (target_x, target_y)
+                } else {
+                    // Flyout is centered: place cleanly at the top of the screen!
+                    let target_x = (wx + (ww - kw) / 2).clamp(wx, (wx + ww - kw).max(wx));
+                    let target_y = (wy + pad).clamp(wy, (wy + wh - kh).max(wy));
+                    (target_x, target_y)
+                }
+            } else {
+                base_origin
+            }
+        } else {
+            base_origin
+        };
+
         if self.repositioning {
             let rx = self.reposition_rx;
             let ry = self.reposition_ry;
@@ -1431,13 +1495,15 @@ impl eframe::App for VKbdApp {
                     self.prefs.remember_position = true;
                     note_last_position((nx, ny));
                     platform::place_window(WINDOW_TITLE, nx, ny, want.0.round() as i32, want.1.round() as i32);
+                    self.last_placed_pos = Some((nx, ny));
                     ctx.request_repaint();
                 }
             }
         }
 
+        let pos_changed = self.last_placed_pos != Some(origin);
         if self.drag_anchor.is_none() && !self.repositioning
-            && (!self.shown || self.sized != want || self.frame.is_multiple_of(90))
+            && (!self.shown || self.sized != want || pos_changed || self.frame.is_multiple_of(90))
         {
             let ok = platform::place_window(
                 WINDOW_TITLE,
@@ -1448,6 +1514,7 @@ impl eframe::App for VKbdApp {
             );
             if ok {
                 self.sized = want;
+                self.last_placed_pos = Some(origin);
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(want.0, want.1)));
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(origin.0 as f32, origin.1 as f32)));
             }
@@ -1612,7 +1679,7 @@ impl eframe::App for VKbdApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(origin.0 as f32, origin.1 as f32)));
             if let Ok(mut g) = self.nav.lock() {
                 g.radial_active = true;
-                g.grid_nav_active = true;
+                g.grid_nav_active = false;
                 g.select = 0;
             }
             ctx.request_repaint();

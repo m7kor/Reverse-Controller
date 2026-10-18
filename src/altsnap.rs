@@ -188,16 +188,17 @@ enum MouseDragMode {
         start_cursor: (i32, i32),
         start_window_rect: (i32, i32, i32, i32), // (left, top, width, height)
         borders: (i32, i32, i32, i32),           // (border_left, border_top, border_right, border_bottom)
+        work_area: (i32, i32, i32, i32),         // (wa_x, wa_y, wa_w, wa_h)
+        unmaximized: bool,                        // whether this drag started from un-maximizing
         last_pos: (i32, i32),
-        last_time: u32,
     },
     Resize {
         hwnd: usize,
         start_cursor: (i32, i32),
         start_window_rect: (i32, i32, i32, i32),
+        work_area: (i32, i32, i32, i32),
         quadrant: ResizeQuadrant,
         last_rect: (i32, i32, i32, i32),
-        last_time: u32,
     },
 }
 
@@ -304,6 +305,7 @@ pub fn get_window_under_cursor() -> Option<HWND> {
                 || class == "WorkerW"
                 || class == "Shell_TrayWnd"
                 || class == "Shell_SecondaryTrayWnd"
+                || class == "Windows.UI.Core.CoreWindow"
             {
                 return None;
             }
@@ -326,10 +328,6 @@ pub fn move_window_relative(
         return;
     }
     unsafe {
-        let mut pt = POINT { x: 0, y: 0 };
-        if GetCursorPos(&mut pt) == 0 {
-            return;
-        }
         if IsZoomed(root) != 0 {
             ShowWindowAsync(root, SW_RESTORE);
         }
@@ -341,7 +339,9 @@ pub fn move_window_relative(
             let mut new_y = rect.top + dy;
 
             if snap_to_edges && snap_distance > 0 {
-                let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+                let cx = (rect.left + rect.right) / 2;
+                let cy = (rect.top + rect.bottom) / 2;
+                let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(cx, cy);
                 let wa_right = wa_x + wa_w;
                 let wa_bottom = wa_y + wa_h;
 
@@ -449,7 +449,9 @@ pub fn resize_window_relative(
             }
 
             if snap_to_edges && snap_distance > 0 {
-                let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+                let cx = (rect.left + rect.right) / 2;
+                let cy = (rect.top + rect.bottom) / 2;
+                let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(cx, cy);
                 let wa_right = wa_x + wa_w;
                 let wa_bottom = wa_y + wa_h;
 
@@ -496,9 +498,11 @@ pub fn snap_window(root: HWND, quad: SnapQuadrant) {
         return;
     }
     unsafe {
-        let mut pt = POINT { x: 0, y: 0 };
-        GetCursorPos(&mut pt);
-        let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+        let mut rect: RECT = std::mem::zeroed();
+        GetWindowRect(root, &mut rect);
+        let cx = if rect.right > rect.left { (rect.left + rect.right) / 2 } else { 0 };
+        let cy = if rect.bottom > rect.top { (rect.top + rect.bottom) / 2 } else { 0 };
+        let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(cx, cy);
 
         match quad {
             SnapQuadrant::Maximize => {
@@ -752,7 +756,6 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
     let mod_down = (GetAsyncKeyState(mod_vk) as u16 & 0x8000) != 0;
 
     // Fast-path: If no drag is active and modifier key is not down, immediately pass through.
-    // 0 mutex locks, 0 allocations, 0 latency.
     if !is_dragging && !mod_down {
         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
     }
@@ -764,7 +767,7 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
         WM_LBUTTONDOWN if mod_down => {
             if let Some(hwnd) = get_window_under_cursor() {
                 SetForegroundWindow(hwnd);
-                let (win_x, win_y, win_w, win_h) = if IsZoomed(hwnd) != 0 {
+                let (win_x, win_y, win_w, win_h, unmaximized) = if IsZoomed(hwnd) != 0 {
                     let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
                     wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
                     let (mut rw, mut rh) = (960, 600);
@@ -778,7 +781,7 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                     }
                     ShowWindow(hwnd, SW_RESTORE);
                     let x = pt.x - rw / 2;
-                    let y = (pt.y - 20).max(0);
+                    let y = (pt.y - 15).max(0);
                     SetWindowPos(
                         hwnd,
                         std::ptr::null_mut(),
@@ -788,11 +791,11 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                         rh,
                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
                     );
-                    (x, y, rw, rh)
+                    (x, y, rw, rh, true)
                 } else {
                     let mut r: RECT = std::mem::zeroed();
                     GetWindowRect(hwnd, &mut r);
-                    (r.left, r.top, (r.right - r.left).max(100), (r.bottom - r.top).max(50))
+                    (r.left, r.top, (r.right - r.left).max(100), (r.bottom - r.top).max(50), false)
                 };
 
                 let frame = get_window_frame_rect(hwnd).unwrap_or(RECT {
@@ -805,6 +808,7 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                 let border_top = (frame.top - win_y).max(0);
                 let border_right = ((win_x + win_w) - frame.right).max(0);
                 let border_bottom = ((win_y + win_h) - frame.bottom).max(0);
+                let wa = crate::platform::work_area_at(pt.x, pt.y);
 
                 if let Ok(mut drag) = ACTIVE_DRAG.lock() {
                     *drag = Some(MouseDragMode::Move {
@@ -812,8 +816,9 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                         start_cursor: (pt.x, pt.y),
                         start_window_rect: (win_x, win_y, win_w, win_h),
                         borders: (border_left, border_top, border_right, border_bottom),
+                        work_area: wa,
+                        unmaximized,
                         last_pos: (win_x, win_y),
-                        last_time: hook_struct.time,
                     });
                     IS_DRAGGING.store(true, Ordering::Relaxed);
                 }
@@ -831,14 +836,15 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                     let quad = detect_resize_quadrant(&rect, pt.x, pt.y);
                     let w = (rect.right - rect.left).max(100);
                     let h = (rect.bottom - rect.top).max(50);
+                    let wa = crate::platform::work_area_at(pt.x, pt.y);
                     if let Ok(mut drag) = ACTIVE_DRAG.lock() {
                         *drag = Some(MouseDragMode::Resize {
                             hwnd: hwnd as usize,
                             start_cursor: (pt.x, pt.y),
                             start_window_rect: (rect.left, rect.top, w, h),
+                            work_area: wa,
                             quadrant: quad,
                             last_rect: (rect.left, rect.top, w, h),
-                            last_time: hook_struct.time,
                         });
                         IS_DRAGGING.store(true, Ordering::Relaxed);
                     }
@@ -884,206 +890,210 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                 return 1;
             }
 
-            let drag_opt = if let Ok(mut drag) = ACTIVE_DRAG.lock() {
-                drag.take()
-            } else {
-                None
-            };
+            if let Ok(mut drag_guard) = ACTIVE_DRAG.lock() {
+                if let Some(mode) = drag_guard.as_mut() {
+                    let snap_edges = ALTSNAP_SNAP_EDGES.load(Ordering::Relaxed);
+                    let snap_dist = ALTSNAP_SNAP_DIST.load(Ordering::Relaxed);
 
-            if let Some(mut mode) = drag_opt {
-                let snap_edges = ALTSNAP_SNAP_EDGES.load(Ordering::Relaxed);
-                let snap_dist = ALTSNAP_SNAP_DIST.load(Ordering::Relaxed);
+                    match mode {
+                        MouseDragMode::Move {
+                            hwnd,
+                            start_cursor,
+                            start_window_rect,
+                            borders,
+                            work_area,
+                            unmaximized,
+                            last_pos,
+                        } => {
+                            // Safety check: Is left mouse button physically down?
+                            if (GetAsyncKeyState(0x01 /* VK_LBUTTON */) as u16 & 0x8000) == 0 {
+                                IS_DRAGGING.store(false, Ordering::Relaxed);
+                                *drag_guard = None;
+                                return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                            }
 
-                match &mut mode {
-                    MouseDragMode::Move {
-                        hwnd,
-                        start_cursor,
-                        start_window_rect,
-                        borders,
-                        last_pos,
-                        last_time,
-                    } => {
-                        // Safety check: Is left mouse button physically down?
-                        if (GetAsyncKeyState(0x01 /* VK_LBUTTON */) as u16 & 0x8000) == 0 {
-                            IS_DRAGGING.store(false, Ordering::Relaxed);
-                            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-                        }
+                            let raw_dx = pt.x - start_cursor.0;
+                            let raw_dy = pt.y - start_cursor.1;
 
-                        let raw_dx = pt.x - start_cursor.0;
-                        let raw_dy = pt.y - start_cursor.1;
+                            let mut outer_x = start_window_rect.0 + raw_dx;
+                            let mut outer_y = start_window_rect.1 + raw_dy;
+                            let width = start_window_rect.2;
+                            let height = start_window_rect.3;
 
-                        let mut outer_x = start_window_rect.0 + raw_dx;
-                        let mut outer_y = start_window_rect.1 + raw_dy;
-                        let width = start_window_rect.2;
-                        let height = start_window_rect.3;
+                            if snap_edges && snap_dist > 0 {
+                                if pt.x < work_area.0
+                                    || pt.x >= work_area.0 + work_area.2
+                                    || pt.y < work_area.1
+                                    || pt.y >= work_area.1 + work_area.3
+                                {
+                                    *work_area = crate::platform::work_area_at(pt.x, pt.y);
+                                }
+                                let wa_x = work_area.0;
+                                let wa_y = work_area.1;
+                                let wa_right = wa_x + work_area.2;
+                                let wa_bottom = wa_y + work_area.3;
 
-                        if snap_edges && snap_dist > 0 {
-                            let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
-                            let wa_right = wa_x + wa_w;
-                            let wa_bottom = wa_y + wa_h;
+                                let vis_x = outer_x + borders.0;
+                                let vis_y = outer_y + borders.1;
+                                let vis_w = width - borders.0 - borders.2;
+                                let vis_h = height - borders.1 - borders.3;
 
-                            let vis_x = outer_x + borders.0;
-                            let vis_y = outer_y + borders.1;
-                            let vis_w = width - borders.0 - borders.2;
-                            let vis_h = height - borders.1 - borders.3;
+                                // Prevent horizontal edge trap: only snap if window fits with room to spare
+                                if vis_w < work_area.2 - snap_dist * 3 {
+                                    if (vis_x - wa_x).abs() <= snap_dist {
+                                        outer_x = wa_x - borders.0;
+                                    } else if (vis_x + vis_w - wa_right).abs() <= snap_dist {
+                                        outer_x = wa_right - vis_w - borders.0;
+                                    }
+                                }
 
-                            // Prevent edge trap: Only snap horizontally if window width is comfortably smaller than monitor
-                            if vis_w < wa_w - snap_dist * 3 {
-                                if (vis_x - wa_x).abs() <= snap_dist {
-                                    outer_x = wa_x - borders.0;
-                                } else if (vis_x + vis_w - wa_right).abs() <= snap_dist {
-                                    outer_x = wa_right - vis_w - borders.0;
+                                // Prevent vertical edge trap: only snap if window fits and not in unmaximize grace zone
+                                let in_unmaximize_grace = *unmaximized && (pt.y - start_cursor.1).abs() < snap_dist * 3;
+                                if !in_unmaximize_grace && vis_h < work_area.3 - snap_dist * 3 {
+                                    if (vis_y - wa_y).abs() <= snap_dist {
+                                        outer_y = wa_y - borders.1;
+                                    } else if (vis_y + vis_h - wa_bottom).abs() <= snap_dist {
+                                        outer_y = wa_bottom - vis_h - borders.1;
+                                    }
                                 }
                             }
 
-                            // Prevent edge trap: Only snap vertically if window height is comfortably smaller than monitor
-                            if vis_h < wa_h - snap_dist * 3 {
-                                if (vis_y - wa_y).abs() <= snap_dist {
-                                    outer_y = wa_y - borders.1;
-                                } else if (vis_y + vis_h - wa_bottom).abs() <= snap_dist {
-                                    outer_y = wa_bottom - vis_h - borders.1;
+                            if outer_x != last_pos.0 || outer_y != last_pos.1 {
+                                *last_pos = (outer_x, outer_y);
+                                SetWindowPos(
+                                    *hwnd as HWND,
+                                    std::ptr::null_mut(),
+                                    outer_x,
+                                    outer_y,
+                                    0,
+                                    0,
+                                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                                );
+                            }
+                            return 1;
+                        }
+                        MouseDragMode::Resize {
+                            hwnd,
+                            start_cursor,
+                            start_window_rect,
+                            work_area,
+                            quadrant,
+                            last_rect,
+                        } => {
+                            // Safety check: Is right mouse button physically down?
+                            if (GetAsyncKeyState(0x02 /* VK_RBUTTON */) as u16 & 0x8000) == 0 {
+                                IS_DRAGGING.store(false, Ordering::Relaxed);
+                                *drag_guard = None;
+                                return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                            }
+
+                            let raw_dx = pt.x - start_cursor.0;
+                            let raw_dy = pt.y - start_cursor.1;
+
+                            let (mut left, mut top, mut width, mut height) = (
+                                start_window_rect.0,
+                                start_window_rect.1,
+                                start_window_rect.2,
+                                start_window_rect.3,
+                            );
+                            let min_w = 160;
+                            let min_h = 100;
+
+                            match *quadrant {
+                                ResizeQuadrant::TopLeft => {
+                                    let nw = (width - raw_dx).max(min_w);
+                                    left += width - nw;
+                                    width = nw;
+                                    let nh = (height - raw_dy).max(min_h);
+                                    top += height - nh;
+                                    height = nh;
+                                }
+                                ResizeQuadrant::TopRight => {
+                                    width = (width + raw_dx).max(min_w);
+                                    let nh = (height - raw_dy).max(min_h);
+                                    top += height - nh;
+                                    height = nh;
+                                }
+                                ResizeQuadrant::BottomLeft => {
+                                    let nw = (width - raw_dx).max(min_w);
+                                    left += width - nw;
+                                    width = nw;
+                                    height = (height + raw_dy).max(min_h);
+                                }
+                                ResizeQuadrant::BottomRight => {
+                                    width = (width + raw_dx).max(min_w);
+                                    height = (height + raw_dy).max(min_h);
+                                }
+                                ResizeQuadrant::Left => {
+                                    let nw = (width - raw_dx).max(min_w);
+                                    left += width - nw;
+                                    width = nw;
+                                }
+                                ResizeQuadrant::Right => {
+                                    width = (width + raw_dx).max(min_w);
+                                }
+                                ResizeQuadrant::Top => {
+                                    let nh = (height - raw_dy).max(min_h);
+                                    top += height - nh;
+                                    height = nh;
+                                }
+                                ResizeQuadrant::Bottom => {
+                                    height = (height + raw_dy).max(min_h);
                                 }
                             }
+
+                            if snap_edges && snap_dist > 0 {
+                                if pt.x < work_area.0
+                                    || pt.x >= work_area.0 + work_area.2
+                                    || pt.y < work_area.1
+                                    || pt.y >= work_area.1 + work_area.3
+                                {
+                                    *work_area = crate::platform::work_area_at(pt.x, pt.y);
+                                }
+                                let wa_x = work_area.0;
+                                let wa_y = work_area.1;
+                                let wa_right = wa_x + work_area.2;
+                                let wa_bottom = wa_y + work_area.3;
+
+                                if matches!(*quadrant, ResizeQuadrant::TopLeft | ResizeQuadrant::BottomLeft | ResizeQuadrant::Left)
+                                    && (left - wa_x).abs() <= snap_dist
+                                {
+                                    width += left - wa_x;
+                                    left = wa_x;
+                                }
+                                if matches!(*quadrant, ResizeQuadrant::TopRight | ResizeQuadrant::BottomRight | ResizeQuadrant::Right)
+                                    && (left + width - wa_right).abs() <= snap_dist
+                                {
+                                    width = wa_right - left;
+                                }
+                                if matches!(*quadrant, ResizeQuadrant::TopLeft | ResizeQuadrant::TopRight | ResizeQuadrant::Top)
+                                    && (top - wa_y).abs() <= snap_dist
+                                {
+                                    height += top - wa_y;
+                                    top = wa_y;
+                                }
+                                if matches!(*quadrant, ResizeQuadrant::BottomLeft | ResizeQuadrant::BottomRight | ResizeQuadrant::Bottom)
+                                    && (top + height - wa_bottom).abs() <= snap_dist
+                                {
+                                    height = wa_bottom - top;
+                                }
+                            }
+
+                            let cur_rect = (left, top, width, height);
+                            if cur_rect != *last_rect {
+                                *last_rect = cur_rect;
+                                SetWindowPos(
+                                    *hwnd as HWND,
+                                    std::ptr::null_mut(),
+                                    left,
+                                    top,
+                                    width,
+                                    height,
+                                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                                );
+                            }
+                            return 1;
                         }
-
-                        if (outer_x != last_pos.0 || outer_y != last_pos.1)
-                            && (hook_struct.time.wrapping_sub(*last_time) >= 8 || (outer_x != last_pos.0 && outer_y != last_pos.1))
-                        {
-                            *last_pos = (outer_x, outer_y);
-                            *last_time = hook_struct.time;
-                            SetWindowPos(
-                                *hwnd as HWND,
-                                std::ptr::null_mut(),
-                                outer_x,
-                                outer_y,
-                                0,
-                                0,
-                                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-                            );
-                        }
-
-                        if let Ok(mut drag) = ACTIVE_DRAG.lock() {
-                            *drag = Some(mode);
-                        }
-                        return 1;
-                    }
-                    MouseDragMode::Resize {
-                        hwnd,
-                        start_cursor,
-                        start_window_rect,
-                        quadrant,
-                        last_rect,
-                        last_time,
-                    } => {
-                        // Safety check: Is right mouse button physically down?
-                        if (GetAsyncKeyState(0x02 /* VK_RBUTTON */) as u16 & 0x8000) == 0 {
-                            IS_DRAGGING.store(false, Ordering::Relaxed);
-                            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-                        }
-
-                        let raw_dx = pt.x - start_cursor.0;
-                        let raw_dy = pt.y - start_cursor.1;
-
-                        let (mut left, mut top, mut width, mut height) = (
-                            start_window_rect.0,
-                            start_window_rect.1,
-                            start_window_rect.2,
-                            start_window_rect.3,
-                        );
-                        let min_w = 160;
-                        let min_h = 100;
-
-                        match *quadrant {
-                            ResizeQuadrant::TopLeft => {
-                                let nw = (width - raw_dx).max(min_w);
-                                left += width - nw;
-                                width = nw;
-                                let nh = (height - raw_dy).max(min_h);
-                                top += height - nh;
-                                height = nh;
-                            }
-                            ResizeQuadrant::TopRight => {
-                                width = (width + raw_dx).max(min_w);
-                                let nh = (height - raw_dy).max(min_h);
-                                top += height - nh;
-                                height = nh;
-                            }
-                            ResizeQuadrant::BottomLeft => {
-                                let nw = (width - raw_dx).max(min_w);
-                                left += width - nw;
-                                width = nw;
-                                height = (height + raw_dy).max(min_h);
-                            }
-                            ResizeQuadrant::BottomRight => {
-                                width = (width + raw_dx).max(min_w);
-                                height = (height + raw_dy).max(min_h);
-                            }
-                            ResizeQuadrant::Left => {
-                                let nw = (width - raw_dx).max(min_w);
-                                left += width - nw;
-                                width = nw;
-                            }
-                            ResizeQuadrant::Right => {
-                                width = (width + raw_dx).max(min_w);
-                            }
-                            ResizeQuadrant::Top => {
-                                let nh = (height - raw_dy).max(min_h);
-                                top += height - nh;
-                                height = nh;
-                            }
-                            ResizeQuadrant::Bottom => {
-                                height = (height + raw_dy).max(min_h);
-                            }
-                        }
-
-                        if snap_edges && snap_dist > 0 {
-                            let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
-                            let wa_right = wa_x + wa_w;
-                            let wa_bottom = wa_y + wa_h;
-
-                            if matches!(*quadrant, ResizeQuadrant::TopLeft | ResizeQuadrant::BottomLeft | ResizeQuadrant::Left)
-                                && (left - wa_x).abs() <= snap_dist
-                            {
-                                width += left - wa_x;
-                                left = wa_x;
-                            }
-                            if matches!(*quadrant, ResizeQuadrant::TopRight | ResizeQuadrant::BottomRight | ResizeQuadrant::Right)
-                                && (left + width - wa_right).abs() <= snap_dist
-                            {
-                                width = wa_right - left;
-                            }
-                            if matches!(*quadrant, ResizeQuadrant::TopLeft | ResizeQuadrant::TopRight | ResizeQuadrant::Top)
-                                && (top - wa_y).abs() <= snap_dist
-                            {
-                                height += top - wa_y;
-                                top = wa_y;
-                            }
-                            if matches!(*quadrant, ResizeQuadrant::BottomLeft | ResizeQuadrant::BottomRight | ResizeQuadrant::Bottom)
-                                && (top + height - wa_bottom).abs() <= snap_dist
-                            {
-                                height = wa_bottom - top;
-                            }
-                        }
-
-                        let cur_rect = (left, top, width, height);
-                        if cur_rect != *last_rect && hook_struct.time.wrapping_sub(*last_time) >= 8 {
-                            *last_rect = cur_rect;
-                            *last_time = hook_struct.time;
-                            SetWindowPos(
-                                *hwnd as HWND,
-                                std::ptr::null_mut(),
-                                left,
-                                top,
-                                width,
-                                height,
-                                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-                            );
-                        }
-
-                        if let Ok(mut drag) = ACTIVE_DRAG.lock() {
-                            *drag = Some(mode);
-                        }
-                        return 1;
                     }
                 }
             }
@@ -1096,26 +1106,30 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                 None
             };
 
-            if let Some(MouseDragMode::Move { hwnd, .. }) = was_dragging {
+            if let Some(MouseDragMode::Move { hwnd, work_area, unmaximized, start_cursor, .. }) = was_dragging {
                 if ALTSNAP_AUTO_MAXIMIZE.load(Ordering::Relaxed) {
-                    let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
-                    let wa_right = wa_x + wa_w;
-                    let wa_bottom = wa_y + wa_h;
+                    let wa_x = work_area.0;
+                    let wa_y = work_area.1;
+                    let wa_right = wa_x + work_area.2;
+                    let wa_bottom = wa_y + work_area.3;
 
-                    if pt.y <= wa_y + 4 {
-                        ShowWindowAsync(hwnd as HWND, SW_MAXIMIZE);
-                    } else if pt.x <= wa_x + 6 && pt.y <= wa_y + 40 {
-                        snap_window(hwnd as HWND, SnapQuadrant::TopLeft);
-                    } else if pt.x >= wa_right - 6 && pt.y <= wa_y + 40 {
-                        snap_window(hwnd as HWND, SnapQuadrant::TopRight);
-                    } else if pt.x <= wa_x + 6 && pt.y >= wa_bottom - 40 {
-                        snap_window(hwnd as HWND, SnapQuadrant::BottomLeft);
-                    } else if pt.x >= wa_right - 6 && pt.y >= wa_bottom - 40 {
-                        snap_window(hwnd as HWND, SnapQuadrant::BottomRight);
-                    } else if pt.x <= wa_x + 6 {
-                        snap_window(hwnd as HWND, SnapQuadrant::LeftHalf);
-                    } else if pt.x >= wa_right - 6 {
-                        snap_window(hwnd as HWND, SnapQuadrant::RightHalf);
+                    let total_moved = (pt.x - start_cursor.0).abs() + (pt.y - start_cursor.1).abs();
+                    if !(unmaximized && total_moved < 30) {
+                        if pt.y <= wa_y {
+                            ShowWindowAsync(hwnd as HWND, SW_MAXIMIZE);
+                        } else if pt.x <= wa_x && pt.y <= wa_y + 40 {
+                            snap_window(hwnd as HWND, SnapQuadrant::TopLeft);
+                        } else if pt.x >= wa_right - 1 && pt.y <= wa_y + 40 {
+                            snap_window(hwnd as HWND, SnapQuadrant::TopRight);
+                        } else if pt.x <= wa_x && pt.y >= wa_bottom - 40 {
+                            snap_window(hwnd as HWND, SnapQuadrant::BottomLeft);
+                        } else if pt.x >= wa_right - 1 && pt.y >= wa_bottom - 40 {
+                            snap_window(hwnd as HWND, SnapQuadrant::BottomRight);
+                        } else if pt.x <= wa_x {
+                            snap_window(hwnd as HWND, SnapQuadrant::LeftHalf);
+                        } else if pt.x >= wa_right - 1 {
+                            snap_window(hwnd as HWND, SnapQuadrant::RightHalf);
+                        }
                     }
                 }
                 return 1;
@@ -1197,5 +1211,38 @@ mod tests {
         assert_eq!(detect_resize_quadrant(&rect, 250, 390), ResizeQuadrant::Bottom);
         assert_eq!(detect_resize_quadrant(&rect, 110, 250), ResizeQuadrant::Left);
         assert_eq!(detect_resize_quadrant(&rect, 390, 250), ResizeQuadrant::Right);
+    }
+
+    #[test]
+    fn test_magnetic_snapping_independent_axes() {
+        let snap_dist: i32 = 15;
+        let wa: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+        let borders: (i32, i32, i32, i32) = (0, 0, 0, 0);
+
+        let outer_x: i32 = 5; // within snap_dist (15) of wa.0 (0)
+        let outer_y: i32 = 300; // far from edges
+        let vis_x: i32 = outer_x + borders.0;
+        let vis_y: i32 = outer_y + borders.1;
+
+        let snapped_x = if (vis_x - wa.0).abs() <= snap_dist { wa.0 - borders.0 } else { outer_x };
+        let snapped_y = if (vis_y - wa.1).abs() <= snap_dist { wa.1 - borders.1 } else { outer_y };
+
+        assert_eq!(snapped_x, 0, "X must snap to 0");
+        assert_eq!(snapped_y, 300, "Y must remain 300 and NOT be altered by X snapping");
+    }
+
+    #[test]
+    fn test_unmaximize_grace_prevents_immediate_top_edge_trap() {
+        let snap_dist: i32 = 15;
+        let unmaximized = true;
+        let start_cursor_y: i32 = 10;
+        let pt_y: i32 = 20; // user pulled down 10px
+
+        let in_unmaximize_grace = unmaximized && (pt_y - start_cursor_y).abs() < snap_dist * 3;
+        assert!(in_unmaximize_grace, "Must be in grace zone so top edge doesn't trap window");
+
+        let pt_y_pulled_down: i32 = 60; // user pulled down 50px
+        let in_unmaximize_grace_after = unmaximized && (pt_y_pulled_down - start_cursor_y).abs() < snap_dist * 3;
+        assert!(!in_unmaximize_grace_after, "Grace zone expires once user intentionally moves away from top edge");
     }
 }

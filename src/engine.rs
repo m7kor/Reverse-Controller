@@ -1381,31 +1381,30 @@ impl Engine {
         if mag <= deadzone || mag == 0.0 {
             if let Some(state) = self.stick_drag_state.take() {
                 if self.config.altsnap.auto_maximize {
-                    let mut pt = crate::altsnap::POINT::default();
+                    let cur_x = state.pos_x.round() as i32;
+                    let cur_y = state.pos_y.round() as i32;
+                    let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(cur_x + state.width / 2, cur_y + 20);
+                    let wa_right = wa_x + wa_w;
+                    let wa_bottom = wa_y + wa_h;
+
                     unsafe {
                         #[link(name = "user32")]
                         extern "system" {
-                            fn GetCursorPos(lpPoint: *mut crate::altsnap::POINT) -> i32;
                             fn ShowWindowAsync(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
                         }
-                        GetCursorPos(&mut pt);
-                        let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
-                        let wa_right = wa_x + wa_w;
-                        let wa_bottom = wa_y + wa_h;
-
-                        if pt.y <= wa_y + 4 {
+                        if cur_y <= wa_y {
                             ShowWindowAsync(state.hwnd as _, 3 /* SW_MAXIMIZE */);
-                        } else if pt.x <= wa_x + 6 && pt.y <= wa_y + 40 {
+                        } else if cur_x <= wa_x && cur_y <= wa_y + 40 {
                             crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::TopLeft);
-                        } else if pt.x >= wa_right - 6 && pt.y <= wa_y + 40 {
+                        } else if cur_x + state.width >= wa_right && cur_y <= wa_y + 40 {
                             crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::TopRight);
-                        } else if pt.x <= wa_x + 6 && pt.y >= wa_bottom - 40 {
+                        } else if cur_x <= wa_x && cur_y + state.height >= wa_bottom - 40 {
                             crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::BottomLeft);
-                        } else if pt.x >= wa_right - 6 && pt.y >= wa_bottom - 40 {
+                        } else if cur_x + state.width >= wa_right && cur_y + state.height >= wa_bottom - 40 {
                             crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::BottomRight);
-                        } else if pt.x <= wa_x + 6 {
+                        } else if cur_x <= wa_x {
                             crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::LeftHalf);
-                        } else if pt.x >= wa_right - 6 {
+                        } else if cur_x + state.width >= wa_right {
                             crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::RightHalf);
                         }
                     }
@@ -1548,6 +1547,7 @@ impl Engine {
                 0,
                 0x0001 /* SWP_NOSIZE */ | 0x0004 /* SWP_NOZORDER */ | 0x0010 /* SWP_NOACTIVATE */ | 0x4000 /* SWP_ASYNCWINDOWPOS */,
             );
+            crate::win32::set_cursor_pos(display_x + state.width / 2, (display_y + 15).max(0));
         }
     }
 
@@ -1931,7 +1931,7 @@ impl Engine {
                 }
                 // Two-way sync: if GUI or pointer interaction set grid_nav_active to false,
                 // and user is not actively pressing D-pad, sync Engine state to false!
-                if !nav.grid_nav_active && !dpad_moving && !split && !radial {
+                if !nav.grid_nav_active && !dpad_moving && !split {
                     self.nav_grid_active = false;
                 }
                 nav.grid_nav_active = self.nav_grid_active;
