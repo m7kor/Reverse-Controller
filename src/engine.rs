@@ -1808,6 +1808,9 @@ impl Engine {
     /// Feed controller input to the virtual keyboard while it is visible.
     /// The engine is in "keyboard mode": no normal bindings run this frame.
     fn feed_nav(&mut self, gp: &w32::XINPUT_GAMEPAD, dt: f64, split: bool, radial: bool) {
+        #[cfg(feature = "gui")]
+        crate::platform::bring_to_top(crate::vkeyboard::WINDOW_TITLE);
+
         let b = gp.wButtons;
         let newly = b & !self.nav_prev_buttons;
         const STICK_TH: i16 = 16000;

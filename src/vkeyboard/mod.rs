@@ -98,6 +98,8 @@ pub fn show_keyboard(flag: &Arc<AtomicBool>) {
     let (x, y) = opening_origin(&prefs, remembered);
     let (w, h) = prefs.window_size();
     platform::place_window(WINDOW_TITLE, x, y, w.round() as i32, h.round() as i32);
+    let _ = platform::enforce_overlay_style(WINDOW_TITLE, true);
+    platform::bring_to_top(WINDOW_TITLE);
     platform::set_window_visible(WINDOW_TITLE, true);
     request_vkeyboard_repaint();
 }
@@ -142,6 +144,8 @@ pub fn toggle_radial_menu(flag: Option<Arc<AtomicBool>>) {
                 (wy as f32 + (wh as f32 - want.1) / 2.0).round() as i32,
             );
             platform::place_window(WINDOW_TITLE, origin.0, origin.1, want.0 as i32, want.1 as i32);
+            let _ = platform::enforce_overlay_style(WINDOW_TITLE, false);
+            platform::bring_to_top(WINDOW_TITLE);
             platform::set_window_visible(WINDOW_TITLE, true);
         }
         request_vkeyboard_repaint();
@@ -821,7 +825,30 @@ impl VKbdApp {
         }
     }
 
-    fn consume_radial_nav(&mut self) -> bool {
+    fn switch_to_keyboard(&mut self, ctx: &egui::Context) {
+        OVERLAY_MODE.store(0, Ordering::SeqCst);
+        self.mode = OverlayMode::Keyboard;
+        self.dirty = true;
+        let (w, h) = self.prefs.window_size();
+        let remembered = self.window_pos.or(self.prefs.last_position);
+        let (ox, oy) = opening_origin(&self.prefs, remembered);
+        self.sized = (w, h);
+        platform::place_window(WINDOW_TITLE, ox, oy, w.round() as i32, h.round() as i32);
+        let _ = platform::enforce_overlay_style(WINDOW_TITLE, true);
+        platform::bring_to_top(WINDOW_TITLE);
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(ox as f32, oy as f32)));
+        self.shown = true;
+        VKBD_SHOWN.store(true, Ordering::SeqCst);
+        if let Ok(mut g) = self.nav.lock() {
+            g.radial_active = false;
+            g.grid_nav_active = true;
+            g.select = 0;
+        }
+        ctx.request_repaint();
+    }
+
+    fn consume_radial_nav(&mut self, ctx: &egui::Context) -> bool {
         let nav = match self.nav.lock() {
             Ok(mut g) => g.drain(),
             Err(_) => return false,
@@ -860,11 +887,15 @@ impl VKbdApp {
 
         if nav.select > 0 {
             if let Some(s) = self.radial_selected_slice {
+                if s == 0 {
+                    self.switch_to_keyboard(ctx);
+                    return false;
+                }
                 self.trigger_radial_action(s);
                 // Slices 1 and 3 are Volume Up / Down: keep the menu open for continuous adjustment!
                 // Slice 0 switches the overlay to keyboard mode.
                 // Every other slice is a one-shot action that closes the menu.
-                return s != 0 && s != 1 && s != 3;
+                return s != 1 && s != 3;
             }
         }
         if nav.close > 0 || nav.hide > 0 {
@@ -878,8 +909,14 @@ impl VKbdApp {
             0 => {
                 OVERLAY_MODE.store(0, Ordering::SeqCst);
                 self.mode = OverlayMode::Keyboard;
-                self.sized = (0.0, 0.0);
                 self.dirty = true;
+                let (w, h) = self.prefs.window_size();
+                let remembered = self.window_pos.or(self.prefs.last_position);
+                let (ox, oy) = opening_origin(&self.prefs, remembered);
+                self.sized = (w, h);
+                platform::place_window(WINDOW_TITLE, ox, oy, w.round() as i32, h.round() as i32);
+                let _ = platform::enforce_overlay_style(WINDOW_TITLE, true);
+                platform::bring_to_top(WINDOW_TITLE);
             }
             1 => {
                 crate::sound::play_sfx(crate::sound::SoundEffect::KeyClick);
@@ -1247,7 +1284,7 @@ impl eframe::App for VKbdApp {
         }
 
         if self.mode == OverlayMode::RadialMenu {
-            if self.consume_radial_nav() {
+            if self.consume_radial_nav(ctx) {
                 platform::move_window(WINDOW_TITLE, -4000, -4000);
                 self.shown = false;
                 self.sized = (0.0, 0.0);
@@ -1257,6 +1294,11 @@ impl eframe::App for VKbdApp {
                 self.reset_transient();
                 crate::platform::trim_working_set();
                 ctx.request_repaint_after(IDLE_REPAINT);
+                return;
+            }
+            if self.mode == OverlayMode::Keyboard {
+                // Slice 0 transitioned immediately to keyboard mode!
+                ctx.request_repaint();
                 return;
             }
 
@@ -1275,9 +1317,12 @@ impl eframe::App for VKbdApp {
                 )
             {
                 self.sized = want;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(want.0, want.1)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(origin.0 as f32, origin.1 as f32)));
             }
             self.shown = true;
             VKBD_SHOWN.store(true, Ordering::SeqCst);
+            platform::bring_to_top(WINDOW_TITLE);
 
             let mut radial_choice = None;
             egui::CentralPanel::default()
@@ -1292,8 +1337,12 @@ impl eframe::App for VKbdApp {
                 });
 
             if let Some(slice) = radial_choice {
+                if slice == 0 {
+                    self.switch_to_keyboard(ctx);
+                    return;
+                }
                 self.trigger_radial_action(slice);
-                if slice != 0 && slice != 1 && slice != 3 {
+                if slice != 1 && slice != 3 {
                     // One-shot actions and the centre "cancel" close the menu.
                     platform::move_window(WINDOW_TITLE, -4000, -4000);
                     self.shown = false;
@@ -1399,6 +1448,8 @@ impl eframe::App for VKbdApp {
             );
             if ok {
                 self.sized = want;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(want.0, want.1)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(origin.0 as f32, origin.1 as f32)));
             }
         }
 
@@ -1407,6 +1458,10 @@ impl eframe::App for VKbdApp {
             VKBD_SHOWN.store(true, Ordering::SeqCst);
             // Each time the keyboard appears, optionally start on the cheat sheet.
             self.hints = self.prefs.show_hints_on_open;
+        }
+
+        if self.shown && self.mode == OverlayMode::Keyboard {
+            platform::bring_to_top(WINDOW_TITLE);
         }
 
         let now = Instant::now();
@@ -1543,7 +1598,23 @@ impl eframe::App for VKbdApp {
         if switch_to_radial {
             OVERLAY_MODE.store(1, Ordering::SeqCst);
             self.mode = OverlayMode::RadialMenu;
-            self.sized = (0.0, 0.0);
+            self.sized = (430.0, 430.0);
+            let want = (430.0f32, 430.0f32);
+            let (wx, wy, ww, wh) = platform::work_area_active();
+            let origin = (
+                (wx as f32 + (ww as f32 - want.0) / 2.0).round() as i32,
+                (wy as f32 + (wh as f32 - want.1) / 2.0).round() as i32,
+            );
+            platform::place_window(WINDOW_TITLE, origin.0, origin.1, want.0 as i32, want.1 as i32);
+            let _ = platform::enforce_overlay_style(WINDOW_TITLE, false);
+            platform::bring_to_top(WINDOW_TITLE);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(want.0, want.1)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(origin.0 as f32, origin.1 as f32)));
+            if let Ok(mut g) = self.nav.lock() {
+                g.radial_active = true;
+                g.grid_nav_active = true;
+                g.select = 0;
+            }
             ctx.request_repaint();
             return;
         }

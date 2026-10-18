@@ -879,6 +879,28 @@ pub fn move_window(title: &str, x: i32, y: i32) -> bool {
     }
 }
 
+/// Reassert HWND_TOPMOST so the overlay stays in front of system flyouts
+/// (such as Windows 11 SearchHost.exe or StartMenuExperienceHost.exe)
+/// without stealing focus.
+pub fn bring_to_top(title: &str) -> bool {
+    unsafe {
+        let hwnd = find_target_hwnd(title);
+        if hwnd.is_null() {
+            return false;
+        }
+        SetWindowPos(
+            hwnd,
+            (-1isize) as HWND,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd),
+        );
+        true
+    }
+}
+
 /// Is the foreground window covering its entire monitor?
 ///
 /// This is the exact test the original .NET app used (`SystemActiveWindowMonitor
