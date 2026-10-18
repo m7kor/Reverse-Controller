@@ -116,7 +116,15 @@ extern "system" {
     fn PostMessageW(hWnd: HWND, Msg: u32, wParam: WPARAM, lParam: LPARAM) -> BOOL;
     fn GetAsyncKeyState(vKey: i32) -> i16;
     fn SetForegroundWindow(hWnd: HWND) -> BOOL;
+    fn GetForegroundWindow() -> HWND;
+    fn GetDesktopWindow() -> HWND;
     fn GetWindowPlacement(hWnd: HWND, lpwndpl: *mut WINDOWPLACEMENT) -> BOOL;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetModuleHandleW(lpModuleName: *const u16) -> *mut c_void;
+    fn GetLastError() -> u32;
 }
 
 #[repr(C)]
@@ -275,6 +283,42 @@ pub fn get_window_frame_rect(root: HWND) -> Option<RECT> {
     }
 }
 
+/// Get valid top-level window at screen coordinates `pt`, ignoring desktop and taskbars.
+pub fn get_window_at(pt: POINT) -> Option<HWND> {
+    unsafe {
+        let under = WindowFromPoint(pt);
+        if under.is_null() {
+            return None;
+        }
+        let root = GetAncestor(under, GA_ROOT);
+        let target = if !root.is_null() { root } else { under };
+        if IsWindowVisible(target) == 0 || IsIconic(target) != 0 {
+            return None;
+        }
+        let desktop = GetDesktopWindow();
+        if !desktop.is_null() && (target == desktop || under == desktop) {
+            return None;
+        }
+        let ov = crate::platform::overlay_hwnd() as HWND;
+        if !ov.is_null() && (target == ov || under == ov) {
+            return None;
+        }
+        let mut buf = [0u16; 64];
+        let len = GetClassNameW(target, buf.as_mut_ptr(), 64);
+        if len > 0 {
+            let class = String::from_utf16_lossy(&buf[..len as usize]);
+            if class == "Progman"
+                || class == "WorkerW"
+                || class == "Shell_TrayWnd"
+                || class == "Shell_SecondaryTrayWnd"
+            {
+                return None;
+            }
+        }
+        Some(target)
+    }
+}
+
 /// Get valid top-level window under the pointer, ignoring desktop/shell and overlay windows.
 pub fn get_window_under_cursor() -> Option<HWND> {
     unsafe {
@@ -282,35 +326,7 @@ pub fn get_window_under_cursor() -> Option<HWND> {
         if GetCursorPos(&mut pt) == 0 {
             return None;
         }
-        let under = WindowFromPoint(pt);
-        if under.is_null() {
-            return None;
-        }
-        let root = GetAncestor(under, GA_ROOT);
-        if root.is_null() {
-            return None;
-        }
-        if IsWindowVisible(root) == 0 || IsIconic(root) != 0 {
-            return None;
-        }
-        let ov = crate::platform::overlay_hwnd() as HWND;
-        if !ov.is_null() && (root == ov || under == ov) {
-            return None;
-        }
-        let mut buf = [0u16; 64];
-        let len = GetClassNameW(root, buf.as_mut_ptr(), 64);
-        if len > 0 {
-            let class = String::from_utf16_lossy(&buf[..len as usize]);
-            if class == "Progman"
-                || class == "WorkerW"
-                || class == "Shell_TrayWnd"
-                || class == "Shell_SecondaryTrayWnd"
-                || class == "Windows.UI.Core.CoreWindow"
-            {
-                return None;
-            }
-        }
-        Some(root)
+        get_window_at(pt)
     }
 }
 
@@ -732,14 +748,35 @@ pub fn close_window(root: HWND) {
     }
 }
 
-fn is_modifier_down(modifier: &str) -> bool {
-    let vk = match modifier {
-        "Ctrl" => 0x11, // VK_CONTROL
-        "Shift" => 0x10, // VK_SHIFT
-        "Win" => 0x5B, // VK_LWIN
-        _ => 0x12, // VK_MENU (Alt)
-    };
-    unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
+fn is_modifier_key_down(vk: u32) -> bool {
+    unsafe {
+        match vk {
+            0x12 => {
+                // Alt: check generic VK_MENU (0x12), Left Alt VK_LMENU (0xA4), Right Alt VK_RMENU (0xA5)
+                (GetAsyncKeyState(0x12) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(0xA4) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(0xA5) as u16 & 0x8000) != 0
+            }
+            0x11 => {
+                // Ctrl: check VK_CONTROL (0x11), VK_LCONTROL (0xA2), VK_RCONTROL (0xA3)
+                (GetAsyncKeyState(0x11) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(0xA2) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(0xA3) as u16 & 0x8000) != 0
+            }
+            0x10 => {
+                // Shift: check VK_SHIFT (0x10), VK_LSHIFT (0xA0), VK_RSHIFT (0xA1)
+                (GetAsyncKeyState(0x10) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(0xA0) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(0xA1) as u16 & 0x8000) != 0
+            }
+            0x5B => {
+                // Win: check VK_LWIN (0x5B), VK_RWIN (0x5C)
+                (GetAsyncKeyState(0x5B) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(0x5C) as u16 & 0x8000) != 0
+            }
+            other => (GetAsyncKeyState(other as i32) as u16 & 0x8000) != 0,
+        }
+    }
 }
 
 unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: isize) -> isize {
@@ -752,8 +789,8 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
     }
 
     let is_dragging = IS_DRAGGING.load(Ordering::Relaxed);
-    let mod_vk = ALTSNAP_MODIFIER_VK.load(Ordering::Relaxed) as i32;
-    let mod_down = (GetAsyncKeyState(mod_vk) as u16 & 0x8000) != 0;
+    let mod_vk = ALTSNAP_MODIFIER_VK.load(Ordering::Relaxed);
+    let mod_down = is_modifier_key_down(mod_vk);
 
     // Fast-path: If no drag is active and modifier key is not down, immediately pass through.
     if !is_dragging && !mod_down {
@@ -765,7 +802,7 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
 
     match wparam {
         WM_LBUTTONDOWN if mod_down => {
-            if let Some(hwnd) = get_window_under_cursor() {
+            if let Some(hwnd) = get_window_at(pt) {
                 SetForegroundWindow(hwnd);
                 let (win_x, win_y, win_w, win_h, unmaximized) = if IsZoomed(hwnd) != 0 {
                     let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
@@ -826,7 +863,7 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
             }
         }
         WM_RBUTTONDOWN if mod_down => {
-            if let Some(hwnd) = get_window_under_cursor() {
+            if let Some(hwnd) = get_window_at(pt) {
                 SetForegroundWindow(hwnd);
                 if IsZoomed(hwnd) != 0 {
                     ShowWindow(hwnd, SW_RESTORE);
@@ -853,13 +890,13 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
             }
         }
         WM_MBUTTONDOWN if mod_down => {
-            if let Some(hwnd) = get_window_under_cursor() {
+            if let Some(hwnd) = get_window_at(pt) {
                 toggle_maximize(hwnd);
                 return 1;
             }
         }
         WM_MOUSEWHEEL if mod_down => {
-            if let Some(hwnd) = get_window_under_cursor() {
+            if let Some(hwnd) = get_window_at(pt) {
                 let step = ALTSNAP_TRANSPARENCY_STEP.load(Ordering::Relaxed);
                 cycle_transparency(hwnd, step);
                 return 1;
@@ -905,13 +942,6 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                             unmaximized,
                             last_pos,
                         } => {
-                            // Safety check: Is left mouse button physically down?
-                            if (GetAsyncKeyState(0x01 /* VK_LBUTTON */) as u16 & 0x8000) == 0 {
-                                IS_DRAGGING.store(false, Ordering::Relaxed);
-                                *drag_guard = None;
-                                return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-                            }
-
                             let raw_dx = pt.x - start_cursor.0;
                             let raw_dy = pt.y - start_cursor.1;
 
@@ -980,13 +1010,6 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                             quadrant,
                             last_rect,
                         } => {
-                            // Safety check: Is right mouse button physically down?
-                            if (GetAsyncKeyState(0x02 /* VK_RBUTTON */) as u16 & 0x8000) == 0 {
-                                IS_DRAGGING.store(false, Ordering::Relaxed);
-                                *drag_guard = None;
-                                return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-                            }
-
                             let raw_dx = pt.x - start_cursor.0;
                             let raw_dy = pt.y - start_cursor.1;
 
@@ -1167,14 +1190,16 @@ pub fn start_mouse_hook(running: Arc<AtomicBool>, config: Arc<Mutex<crate::confi
             crate::platform::attach_to_interactive_desktop();
             unsafe {
                 HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
+                let hmod = GetModuleHandleW(std::ptr::null());
                 let hook = SetWindowsHookExW(
                     WH_MOUSE_LL,
                     altsnap_mouse_proc,
-                    std::ptr::null_mut(),
+                    hmod,
                     0,
                 );
                 if hook.is_null() {
-                    crate::platform::log_debug("[altsnap] failed to install WH_MOUSE_LL hook");
+                    let err = GetLastError();
+                    crate::platform::log_debug(&format!("[altsnap] failed to install WH_MOUSE_LL hook: error {err}"));
                     return;
                 }
                 crate::platform::log_debug("[altsnap] WH_MOUSE_LL hook installed successfully");
@@ -1244,5 +1269,49 @@ mod tests {
         let pt_y_pulled_down: i32 = 60; // user pulled down 50px
         let in_unmaximize_grace_after = unmaximized && (pt_y_pulled_down - start_cursor_y).abs() < snap_dist * 3;
         assert!(!in_unmaximize_grace_after, "Grace zone expires once user intentionally moves away from top edge");
+    }
+
+    #[test]
+    fn test_hook_installation() {
+        unsafe {
+            let hmod_null = std::ptr::null_mut();
+            let hook_null = SetWindowsHookExW(WH_MOUSE_LL, altsnap_mouse_proc, hmod_null, 0);
+            let err_null = GetLastError();
+            let hmod_real = GetModuleHandleW(std::ptr::null());
+            let hook_real = SetWindowsHookExW(WH_MOUSE_LL, altsnap_mouse_proc, hmod_real, 0);
+            let err_real = GetLastError();
+            eprintln!("HOOK NULL: pointer={:?}, error={}", hook_null, err_null);
+            eprintln!("HOOK REAL: pointer={:?}, error={}", hook_real, err_real);
+            if !hook_null.is_null() {
+                UnhookWindowsHookEx(hook_null);
+            }
+            if !hook_real.is_null() {
+                UnhookWindowsHookEx(hook_real);
+            }
+            assert!(!hook_real.is_null(), "SetWindowsHookExW with GetModuleHandleW must succeed! err={err_real}");
+        }
+    }
+
+    #[test]
+    fn test_window_under_cursor_logic() {
+        unsafe {
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            let under = WindowFromPoint(pt);
+            let root = GetAncestor(under, GA_ROOT);
+            let root_owner = GetAncestor(under, 3 /* GA_ROOTOWNER */);
+            let mut buf_under = [0u16; 64];
+            let len_under = GetClassNameW(under, buf_under.as_mut_ptr(), 64);
+            let class_under = String::from_utf16_lossy(&buf_under[..len_under.max(0) as usize]);
+            let mut buf_root = [0u16; 64];
+            let len_root = GetClassNameW(root, buf_root.as_mut_ptr(), 64);
+            let class_root = String::from_utf16_lossy(&buf_root[..len_root.max(0) as usize]);
+            eprintln!("DIAG: pt={:?}, under={:?}(class={}), root={:?}(class={}), root_owner={:?}",
+                pt, under, class_under, root, class_root, root_owner);
+            eprintln!("DIAG: is_visible(root)={}, is_iconic(root)={}",
+                IsWindowVisible(root), IsIconic(root));
+        }
+        let wnd = get_window_under_cursor();
+        eprintln!("get_window_under_cursor returned: {:?}", wnd);
     }
 }

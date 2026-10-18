@@ -5,6 +5,17 @@ All notable changes to the **Reverse Controller** (Controller Companion — Nati
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [v1.3.2] — 2026-10-18
+
+### 🚀 Highlights & Critical Bug Fixes
+- **AltSnap Hook Installation & Drag Lifecycle Overhaul**:
+  - **Fixed Low-Level Hook Installation Failure**: Resolved `ERROR_HOOK_NEEDS_HMOD` (Win32 error 1428) where passing a null module handle caused `SetWindowsHookExW(WH_MOUSE_LL)` to fail silently, completely disabling AltSnap on Windows. Hook now correctly registers with `GetModuleHandleW(std::ptr::null())`.
+  - **Fixed Premature Mouse Move Cancellation**: Removed aggressive `GetAsyncKeyState(0x01)` check inside `WM_MOUSEMOVE` that caused false negatives on initial drag frames and terminated mouse drags before movement started. The drag lifecycle is now strictly governed by `WM_LBUTTONDOWN` -> `WM_MOUSEMOVE` -> `WM_LBUTTONUP` (and right click for resize).
+  - **Comprehensive Modifier Key Detection**: Expanded modifier key checks to explicitly support generic and distinct physical keys (`VK_MENU`, `VK_LMENU`, `VK_RMENU` / AltGr for Alt; `VK_CONTROL`, `VK_LCONTROL`, `VK_RCONTROL` for Ctrl; `VK_SHIFT`, `VK_LSHIFT`, `VK_RSHIFT` for Shift; `VK_LWIN`, `VK_RWIN` for Win) across multilingual and Arabic keyboards.
+  - **UWP / Modern App Dragging**: Removed overly restrictive `Windows.UI.Core.CoreWindow` filter so modern Windows 10/11 apps (Calculator, Settings, Terminal, modern Explorer tabs) can now be smoothly dragged, snapped, and resized.
+  - **Escape Key Drag Cancellation**: Pressing `Esc` during an active window drag or resize immediately cancels the operation and snaps the window back to its original position.
+
+---
 ## [v1.3.1] — 2026-10-18
 
 ### 🚀 Highlights & Bug Fixes
