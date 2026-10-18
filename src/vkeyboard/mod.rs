@@ -1744,7 +1744,8 @@ pub fn spawn(
                     .with_visible(start_visible)
                     .with_active(false)
                     .with_decorations(false)
-                    .with_transparent(true),
+                    .with_transparent(true)
+                    .with_taskbar(false),
                 event_loop_builder: Some(Box::new(|builder| {
                     use winit::platform::windows::EventLoopBuilderExtWindows;
                     builder.with_any_thread(true);

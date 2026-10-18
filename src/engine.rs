@@ -978,15 +978,21 @@ impl Engine {
             None => match self.xinput.get_state(idx) {
                 Some(s) => {
                     self.missed_polls = 0;
+                    self.quiesced = false;
                     self.use_xinput_pad();
                     s.Gamepad
                 }
                 None => {
                     // Debounce transient wireless / Bluetooth packet dropouts:
-                    // If we were connected, tolerate up to 15 consecutive missed polls (~120ms)
+                    // If we were connected, tolerate up to 125 consecutive missed polls (~1000ms)
                     // before declaring the pad disconnected or scanning other slots.
-                    if self.was_connected && self.missed_polls < 15 {
+                    // To prevent runaway mouse or stuck keys during a brief dropout, release held
+                    // inputs after 10 polls (~80ms), but keep was_connected = true.
+                    if self.was_connected && self.missed_polls < 125 {
                         self.missed_polls += 1;
+                        if self.missed_polls > 10 {
+                            self.quiesce();
+                        }
                         return;
                     }
                     self.missed_polls = 0;
@@ -994,7 +1000,7 @@ impl Engine {
                     // Auto-scan the other slots for a replacement pad. Polling an
                     // empty XInput slot is slow, so scan at most twice a second.
                     let mut found = None;
-                    let scan_due = now >= self.next_slot_scan;
+                    let scan_due = now >= self.next_slot_scan || self.was_connected;
                     if scan_due {
                         self.next_slot_scan = now + 0.5;
                     }
@@ -1010,6 +1016,7 @@ impl Engine {
                         // A replacement pad must not inherit held inputs or a
                         // recovery chord from the controller that disappeared.
                         self.release_all_if_needed();
+                        self.quiesced = false;
                         self.toggle_chord_down = false;
                         self.config.controller.controller_index = new_slot;
                         idx = new_slot;
@@ -1019,6 +1026,7 @@ impl Engine {
                         .then(|| self.generic.poll(now))
                         .flatten()
                     {
+                        self.quiesced = false;
                         // No XInput pad on any slot: a PlayStation, Switch Pro
                         // or generic controller drives the same pipeline. A
                         // third-party Xbox-mode pad is also visible to the

@@ -217,8 +217,44 @@ enum MouseDragMode {
 unsafe extern "system" fn enum_snap_windows(w: HWND, lparam: LPARAM) -> BOOL {
     let (target_hwnd, list) = &mut *(lparam as *mut (HWND, Vec<RECT>));
     if w != *target_hwnd && IsWindowVisible(w) != 0 && IsIconic(w) == 0 {
-        let mut r: RECT = std::mem::zeroed();
-        if GetWindowRect(w, &mut r) != 0 {
+        // Filter out cloaked windows (hidden on other Windows 10/11 virtual desktops)
+        let mut cloaked: u32 = 0;
+        let hr = DwmGetWindowAttribute(
+            w,
+            14, // DWMWA_CLOAKED
+            &mut cloaked as *mut _ as *mut c_void,
+            std::mem::size_of::<u32>() as DWORD,
+        );
+        if hr == 0 && cloaked != 0 {
+            return 1;
+        }
+
+        // Filter out tool windows, popups, and overlays
+        let ex_style = GetWindowLongPtrW(w, GWL_EXSTYLE) as usize;
+        if (ex_style & 0x00000080 /* WS_EX_TOOLWINDOW */) != 0 {
+            return 1;
+        }
+
+        // Filter out desktop background and Windows shell components
+        let mut class_buf = [0u16; 64];
+        let class_len = GetClassNameW(w, class_buf.as_mut_ptr(), class_buf.len() as i32);
+        if class_len > 0 {
+            let class_name = String::from_utf16_lossy(&class_buf[..class_len as usize]);
+            if class_name == "Progman"
+                || class_name == "WorkerW"
+                || class_name == "Shell_TrayWnd"
+                || class_name == "Shell_SecondaryTrayWnd"
+                || class_name == "Windows.UI.Core.CoreWindow"
+                || class_name == "Xaml_WindowedPopupClass"
+                || class_name == "TopLevelWindowForOverflowXamlIsland"
+                || class_name == "TaskListThumbnailWnd"
+            {
+                return 1;
+            }
+        }
+
+        // Use true DWM visual frame rectangle (excluding invisible drop shadow margins)
+        if let Some(r) = get_window_frame_rect(w) {
             if (r.right - r.left) > 120 && (r.bottom - r.top) > 100 {
                 list.push(r);
             }
@@ -1054,26 +1090,32 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                                 // Window-to-window magnetic snapping
                                 if !in_unmaximize_grace {
                                     for other in other_windows.iter() {
-                                        // Snap left/right edges
-                                        if (vis_x - other.right).abs() <= snap_dist {
-                                            outer_x = other.right - borders.0;
-                                        } else if (vis_x + vis_w - other.left).abs() <= snap_dist {
-                                            outer_x = other.left - vis_w - borders.0;
-                                        } else if (vis_x - other.left).abs() <= snap_dist {
-                                            outer_x = other.left - borders.0;
-                                        } else if (vis_x + vis_w - other.right).abs() <= snap_dist {
-                                            outer_x = other.right - vis_w - borders.0;
+                                        // Snap left/right edges only if vertical bounds overlap
+                                        let v_overlap = vis_y < other.bottom + snap_dist && vis_y + vis_h > other.top - snap_dist;
+                                        if v_overlap {
+                                            if (vis_x - other.right).abs() <= snap_dist {
+                                                outer_x = other.right - borders.0;
+                                            } else if (vis_x + vis_w - other.left).abs() <= snap_dist {
+                                                outer_x = other.left - vis_w - borders.0;
+                                            } else if (vis_x - other.left).abs() <= snap_dist {
+                                                outer_x = other.left - borders.0;
+                                            } else if (vis_x + vis_w - other.right).abs() <= snap_dist {
+                                                outer_x = other.right - vis_w - borders.0;
+                                            }
                                         }
 
-                                        // Snap top/bottom edges
-                                        if (vis_y - other.bottom).abs() <= snap_dist {
-                                            outer_y = other.bottom - borders.1;
-                                        } else if (vis_y + vis_h - other.top).abs() <= snap_dist {
-                                            outer_y = other.top - vis_h - borders.1;
-                                        } else if (vis_y - other.top).abs() <= snap_dist {
-                                            outer_y = other.top - borders.1;
-                                        } else if (vis_y + vis_h - other.bottom).abs() <= snap_dist {
-                                            outer_y = other.bottom - vis_h - borders.1;
+                                        // Snap top/bottom edges only if horizontal bounds overlap
+                                        let h_overlap = vis_x < other.right + snap_dist && vis_x + vis_w > other.left - snap_dist;
+                                        if h_overlap {
+                                            if (vis_y - other.bottom).abs() <= snap_dist {
+                                                outer_y = other.bottom - borders.1;
+                                            } else if (vis_y + vis_h - other.top).abs() <= snap_dist {
+                                                outer_y = other.top - vis_h - borders.1;
+                                            } else if (vis_y - other.top).abs() <= snap_dist {
+                                                outer_y = other.top - borders.1;
+                                            } else if (vis_y + vis_h - other.bottom).abs() <= snap_dist {
+                                                outer_y = other.bottom - vis_h - borders.1;
+                                            }
                                         }
                                     }
                                 }
@@ -1406,5 +1448,36 @@ mod tests {
         }
         let wnd = get_window_under_cursor();
         eprintln!("get_window_under_cursor returned: {:?}", wnd);
+    }
+
+    #[test]
+    fn test_window_to_window_snapping_requires_orthogonal_overlap() {
+        let snap_dist: i32 = 15;
+        let borders = (0, 0, 0, 0);
+        let vis_h = 300;
+
+        let other = RECT { left: 0, top: 0, right: 400, bottom: 300 };
+
+        // Case 1: Adjacent horizontally and overlaps vertically
+        let mut outer_x = 410;
+        let vis_x = outer_x;
+        let vis_y = 100;
+        let v_overlap = vis_y < other.bottom + snap_dist && vis_y + vis_h > other.top - snap_dist;
+        assert!(v_overlap);
+        if v_overlap && (vis_x - other.right).abs() <= snap_dist {
+            outer_x = other.right - borders.0;
+        }
+        assert_eq!(outer_x, 400, "X must snap to other.right because vertical bounds overlap");
+
+        // Case 2: Adjacent horizontally but NO vertical overlap (800 is far below 300)
+        let mut outer_x2 = 410;
+        let vis_x2 = outer_x2;
+        let vis_y2 = 800;
+        let v_overlap2 = vis_y2 < other.bottom + snap_dist && vis_y2 + vis_h > other.top - snap_dist;
+        assert!(!v_overlap2);
+        if v_overlap2 && (vis_x2 - other.right).abs() <= snap_dist {
+            outer_x2 = other.right - borders.0;
+        }
+        assert_eq!(outer_x2, 410, "X must NOT snap because there is no vertical overlap");
     }
 }

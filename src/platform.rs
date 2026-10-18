@@ -968,10 +968,12 @@ extern "system" {
     fn InvalidateRect(hwnd: HWND, rect: *const RECT, erase: BOOL) -> BOOL;
     fn GetAncestor(hwnd: HWND, flags: u32) -> HWND;
     fn IsZoomed(hwnd: HWND) -> BOOL;
+    fn BringWindowToTop(hwnd: HWND) -> BOOL;
 }
 
 const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_NOOWNERZORDER: u32 = 0x0200;
 const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
 
 /// Extra `SetWindowPos` flag when `hwnd` belongs to another thread: the call
@@ -1138,6 +1140,7 @@ pub fn bring_to_top(title: &str) -> bool {
         if cur_parent != 0 {
             SetWindowLongPtrW(hwnd, -8, 0);
         }
+        BringWindowToTop(hwnd);
         SetWindowPos(
             hwnd,
             (-1isize) as HWND,
@@ -1145,7 +1148,7 @@ pub fn bring_to_top(title: &str) -> bool {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd),
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | async_flag(hwnd),
         );
         true
     }
@@ -1312,6 +1315,7 @@ pub fn enforce_overlay_style(title: &str, backdrop: bool) -> bool {
             const SWP_NOMOVE: u32 = 0x0002;
             const SWP_NOSIZE: u32 = 0x0001;
             const SWP_NOACTIVATE: u32 = 0x0010;
+            BringWindowToTop(hwnd);
             SetWindowPos(
                 hwnd,
                 (-1isize) as HWND,
@@ -1319,7 +1323,7 @@ pub fn enforce_overlay_style(title: &str, backdrop: bool) -> bool {
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
             );
         }
         let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);

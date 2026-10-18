@@ -717,6 +717,8 @@ struct SettingsApp {
     wizard: Option<(u32, crate::gamepads::MapWizard)>,
     /// Non-XInput controllers found by the last "find controllers" click.
     other_pads: Vec<crate::gamepads::Device>,
+    last_pad_poll: Instant,
+    last_preview: Option<(crate::win32::XINPUT_GAMEPAD, String)>,
 }
 
 const TUTORIAL_STEPS: usize = 6;
@@ -792,6 +794,8 @@ impl SettingsApp {
             tutorial: [false; TUTORIAL_STEPS],
             wizard: None,
             other_pads: crate::gamepads::list_models(),
+            last_pad_poll: Instant::now() - Duration::from_secs(1),
+            last_preview: None,
         }
     }
 
@@ -988,21 +992,30 @@ impl SettingsApp {
         }
         let snapshot = self.runtime_status.clone();
         let slot = snapshot.as_ref().map_or(self.working.controller.controller_index, |s| s.controller_index);
-        let (connected, enabled, battery, preview, profile) = self
+        let live_view = matches!(self.page, SettingsPage::Controller | SettingsPage::Tutorial);
+        let need_pad = live_view || self.calibration.is_some() || self.wizard.is_some();
+        let preview = if need_pad {
+            if self.last_pad_poll.elapsed() >= Duration::from_millis(33) {
+                self.last_pad_poll = Instant::now();
+                self.last_preview = self.engine.lock().ok().and_then(|mut e| e.preview_pad(slot));
+            }
+            self.last_preview.clone()
+        } else {
+            None
+        };
+        let (connected, enabled, battery, profile) = self
             .engine
             .lock()
-            .map(|mut e| {
+            .map(|e| {
                 let name = e.config().active_profile.clone();
-                let preview = e.preview_pad(slot);
                 (
                     e.is_connected() || preview.is_some(),
                     e.is_enabled(),
                     e.battery_info(),
-                    preview,
                     if name.is_empty() { crate::profiles::DEFAULT_NAME.to_string() } else { name },
                 )
             })
-            .unwrap_or((false, false, None, None, crate::profiles::DEFAULT_NAME.to_string()));
+            .unwrap_or((false, false, None, crate::profiles::DEFAULT_NAME.to_string()));
         let (pad, local_name) = match preview {
             Some((pad, name)) => (Some(pad), name),
             None => (None, String::new()),
@@ -2253,6 +2266,33 @@ impl eframe::App for SettingsApp {
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) && self.is_dirty() {
             self.commit();
+        }
+
+        // Quick page navigation with PageUp / PageDown or Ctrl+Tab
+        const ALL_PAGES: [SettingsPage; 10] = [
+            SettingsPage::Home,
+            SettingsPage::Tutorial,
+            SettingsPage::Pointer,
+            SettingsPage::AltSnap,
+            SettingsPage::Controller,
+            SettingsPage::Keyboard,
+            SettingsPage::Buttons,
+            SettingsPage::Profiles,
+            SettingsPage::General,
+            SettingsPage::About,
+        ];
+        let prev_page = ctx.input(|i| i.key_pressed(egui::Key::PageUp) || (i.modifiers.ctrl && i.key_pressed(egui::Key::Tab) && i.modifiers.shift));
+        let next_page = ctx.input(|i| i.key_pressed(egui::Key::PageDown) || (i.modifiers.ctrl && i.key_pressed(egui::Key::Tab) && !i.modifiers.shift));
+        if prev_page {
+            if let Some(pos) = ALL_PAGES.iter().position(|p| *p == self.page) {
+                let next_idx = if pos == 0 { ALL_PAGES.len() - 1 } else { pos - 1 };
+                self.page = ALL_PAGES[next_idx];
+            }
+        } else if next_page {
+            if let Some(pos) = ALL_PAGES.iter().position(|p| *p == self.page) {
+                let next_idx = (pos + 1) % ALL_PAGES.len();
+                self.page = ALL_PAGES[next_idx];
+            }
         }
 
         let live = self.live();
