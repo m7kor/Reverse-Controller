@@ -1409,6 +1409,7 @@ impl Engine {
         let (ix, iy) = (px.trunc() as i32, (py * y_scalar).trunc() as i32);
         if ix != 0 || iy != 0 {
             mouse::move_relative(ix, iy);
+            crate::platform::check_controller_drag();
         }
     }
 
@@ -1902,6 +1903,7 @@ impl Engine {
             mouse::button_up(crate::mouse::MouseButton::Left);
             self.nav_mouse_down = false;
         }
+        crate::platform::note_controller_left_release();
     }
 
     /// Graceful shutdown: release keys and stop all rumble.
@@ -2089,7 +2091,12 @@ fn tap_combo(key: &mut KeyPresser, keys: &[crate::keys::Key]) {
 fn on_released(action: &Action, key: &mut KeyPresser, _xinput: &w32::XInputApi, _idx: u32) {
     match action {
         Action::Key { key: k, .. } => key.up(*k),
-        Action::MouseClick(btn) => mouse::button_up(*btn),
+        Action::MouseClick(btn) => {
+            if *btn == mouse::MouseButton::Left {
+                crate::platform::note_controller_left_release();
+            }
+            mouse::button_up(*btn);
+        }
         _ => {}
     }
 }

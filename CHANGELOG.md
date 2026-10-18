@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Window title lookup & controller click bounds**: fixed overlay title mismatch (`CCVKbd` vs `Controller Companion Keyboard`) and bounded controller click tracking so physical mouse clicks properly dismiss the overlay.
 - **Trigger threshold drift protection**: added lower bound safety and hysteresis to prevent analog trigger drift from latching held `Ctrl` or `Shift` modifier keys.
 - **Strict fullscreen detection restored**: reverted overly broad `QUNS_APP`/`QUNS_BUSY` states and coordinate tolerance back to strict exclusive D3D (`QUNS_RUNNING_D3D_FULL_SCREEN`) and exact monitor dimensions, preventing windowed apps from pausing controller input.
+- **Text selection & auto-show fix**: removed false-positive `is_cursor_ibeam()` checks and added mouse drag tracking so selecting/highlighting text across documents or web pages behaves like a regular mouse and no longer triggers the on-screen virtual keyboard.
 - Quitting while an app-specific profile was active saved its bindings over your own; exit now writes back only on/off, a profile you chose from the controller, and the keyboard position.
 - Auto-switching returned to *Default* instead of your chosen profile, switched when focusing the app's own windows, and stopped re-applying after a settings reload.
 - `ActivateProfile`, `NextVirtualDesktop`, `PrevVirtualDesktop` and voice typing actions did nothing.

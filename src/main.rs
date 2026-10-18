@@ -559,8 +559,10 @@ fn main() {
                         let immediate = platform::take_text_click();
                         let is_ctrl = platform::last_click_was_controller();
                         let recent_click = platform::last_click_within_ms(350);
-                        let is_text = is_ctrl && recent_click && (platform::is_cursor_ibeam() || platform::caret_active());
-                        if is_ctrl && (immediate || is_text) {
+                        let is_dragging = platform::is_controller_dragging();
+                        let lbutton_down = platform::is_controller_lbutton_down();
+                        let is_text = is_ctrl && recent_click && !is_dragging && !lbutton_down && platform::caret_active();
+                        if is_ctrl && !is_dragging && !lbutton_down && (immediate || is_text) {
                             let was_vis = f2.load(Ordering::SeqCst);
                             if !was_vis {
                                 crate::platform::log_debug("[main] Text click detected -> surfacing virtual keyboard");

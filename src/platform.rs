@@ -272,12 +272,18 @@ pub fn clear_last_click() {
     LAST_LCLICK_TIME.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+static CONTROLLER_LBUTTON_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CLICK_START_POS: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+static IS_DRAGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Record a controller left-click natively in-process. Inspects text-box status
 /// immediately without any low-level OS mouse hooks.
 pub fn note_controller_left_click() {
     let now_ms = (crate::steady_seconds() * 1000.0) as u64;
     LAST_LCLICK_TIME.store(now_ms, std::sync::atomic::Ordering::SeqCst);
     LAST_CLICK_WAS_CONTROLLER.store(true, std::sync::atomic::Ordering::SeqCst);
+    CONTROLLER_LBUTTON_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    IS_DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
     push_foreground();
     // Only remember where the click landed. Deciding whether that is a text
     // box can mean a cross-process accessibility query, which blocks while
@@ -289,8 +295,46 @@ pub fn note_controller_left_click() {
             if let Ok(mut pending) = PENDING_CLICK.lock() {
                 *pending = Some((pt.x, pt.y));
             }
+            if let Ok(mut start) = CLICK_START_POS.lock() {
+                *start = Some((pt.x, pt.y));
+            }
         }
     }
+}
+
+pub fn note_controller_left_release() {
+    CONTROLLER_LBUTTON_DOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn is_controller_lbutton_down() -> bool {
+    CONTROLLER_LBUTTON_DOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn check_controller_drag() {
+    if !CONTROLLER_LBUTTON_DOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    unsafe {
+        let mut cur: POINT = std::mem::zeroed();
+        if GetCursorPos(&mut cur) != 0 {
+            if let Ok(start) = CLICK_START_POS.lock() {
+                if let Some((sx, sy)) = *start {
+                    let dx = (cur.x - sx).abs();
+                    let dy = (cur.y - sy).abs();
+                    // If pointer moved more than 8 pixels while holding left click,
+                    // the user is selecting text or dragging. Cancel any virtual keyboard popup.
+                    if dx > 8 || dy > 8 {
+                        IS_DRAGGING.store(true, std::sync::atomic::Ordering::SeqCst);
+                        CLICK_IN_TEXT.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn is_controller_dragging() -> bool {
+    IS_DRAGGING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Where the last controller click landed, waiting to be classified.
@@ -300,7 +344,7 @@ static PENDING_CLICK: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::n
 fn classify_pending_click() {
     let pending = PENDING_CLICK.lock().ok().and_then(|mut p| p.take());
     if let Some((x, y)) = pending {
-        if is_cursor_ibeam() || point_is_text_field(POINT { x, y }) {
+        if !is_controller_dragging() && point_is_text_field(POINT { x, y }) {
             CLICK_IN_TEXT.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -409,6 +453,7 @@ pub fn cursor_is_hand() -> bool {
     }
 }
 
+#[allow(dead_code)]
 pub fn is_cursor_ibeam() -> bool {
     #[link(name = "user32")]
     extern "system" {
@@ -543,8 +588,8 @@ fn point_is_text_field(pt: POINT) -> bool {
         return true;
     }
 
-    // 4. A real caret on the foreground thread or I-Beam cursor.
-    if caret_active() || is_cursor_ibeam() {
+    // 4. A real caret on the foreground thread.
+    if caret_active() {
         return true;
     }
 
