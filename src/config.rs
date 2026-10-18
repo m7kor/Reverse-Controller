@@ -615,9 +615,19 @@ impl Config {
     /// Is `exe` (a lowercase process file name) allowed to keep desktop
     /// control while it is fullscreen?
     pub fn is_fullscreen_exception(&self, exe: &str) -> bool {
+        let trimmed = exe.trim();
+        let lower = trimmed.to_lowercase();
+        if lower == "reversecontroller.exe"
+            || lower == "reverse-controller.exe"
+            || lower == "controller-companion.exe"
+            || lower.contains("reverse")
+            || lower.contains("companion")
+        {
+            return true;
+        }
         self.fullscreen_exceptions
             .iter()
-            .any(|e| e.trim().eq_ignore_ascii_case(exe))
+            .any(|e| e.trim().eq_ignore_ascii_case(trimmed))
     }
 }
 

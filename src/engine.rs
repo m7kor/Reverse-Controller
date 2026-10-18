@@ -476,6 +476,7 @@ pub struct Engine {
     was_fullscreen_paused: bool,
     stick_drag_state: Option<StickDragState>,
     stick_resize_state: Option<StickResizeState>,
+    missed_polls: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -571,6 +572,7 @@ impl Engine {
             was_fullscreen_paused: false,
             stick_drag_state: None,
             stick_resize_state: None,
+            missed_polls: 0,
         };
         eng.generic.set_overrides(pad_overrides(&eng.config));
         eng.rebuild_bindings();
@@ -969,13 +971,26 @@ impl Engine {
 
         let mut idx = self.config.controller.controller_index;
         let gp = match self.injected {
-            Some(g) => g,
+            Some(g) => {
+                self.missed_polls = 0;
+                g
+            }
             None => match self.xinput.get_state(idx) {
                 Some(s) => {
+                    self.missed_polls = 0;
                     self.use_xinput_pad();
                     s.Gamepad
                 }
                 None => {
+                    // Debounce transient wireless / Bluetooth packet dropouts:
+                    // If we were connected, tolerate up to 15 consecutive missed polls (~120ms)
+                    // before declaring the pad disconnected or scanning other slots.
+                    if self.was_connected && self.missed_polls < 15 {
+                        self.missed_polls += 1;
+                        return;
+                    }
+                    self.missed_polls = 0;
+
                     // Auto-scan the other slots for a replacement pad. Polling an
                     // empty XInput slot is slow, so scan at most twice a second.
                     let mut found = None;
@@ -1457,8 +1472,14 @@ impl Engine {
                         }
                         ShowWindow(hwnd, 9 /* SW_RESTORE */);
                         let pt = crate::win32::get_cursor_pos().unwrap_or((500, 300));
-                        let x = pt.0 - rw / 2;
-                        let y = (pt.1 - 20).max(0);
+                        let (wa_x, wa_y, wa_w, _wa_h) = crate::platform::work_area_at(pt.0, pt.1);
+                        let ratio_x = if wa_w > 0 {
+                            ((pt.0 - wa_x) as f32 / wa_w as f32).clamp(0.05, 0.95)
+                        } else {
+                            0.5
+                        };
+                        let x = pt.0 - (rw as f32 * ratio_x).round() as i32;
+                        let y = (pt.1 - 20).max(wa_y);
                         SetWindowPos(
                             hwnd,
                             std::ptr::null_mut(),
@@ -2211,7 +2232,18 @@ impl Engine {
             return false;
         }
         match crate::platform::foreground_process_name_cached() {
-            Some(exe) => !self.config.is_fullscreen_exception(&exe),
+            Some(exe) => {
+                let lower = exe.to_lowercase();
+                if lower == "reversecontroller.exe"
+                    || lower == "reverse-controller.exe"
+                    || lower == "controller-companion.exe"
+                    || lower.contains("reverse")
+                    || lower.contains("companion")
+                {
+                    return false;
+                }
+                !self.config.is_fullscreen_exception(&exe)
+            }
             None => true,
         }
     }

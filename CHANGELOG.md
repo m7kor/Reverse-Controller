@@ -5,6 +5,28 @@ All notable changes to the **Reverse Controller** (Controller Companion — Nati
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [v1.3.3] — 2026-10-18
+
+### 🚀 Highlights & Critical Bug Fixes
+- **Strict Virtual Keyboard Z-Order & Taskbar Suppression**:
+  - **Start Menu & Search Layering**: The virtual keyboard (`CCVKbd`) now strictly renders on top of the Windows 11 Start Menu (`StartMenuExperienceHost.exe`) and Search flyouts (`SearchHost.exe`). Eliminated faulty `HWND_TOP` (`0 as HWND`) demotions and foreign process owner bindings (`GWLP_HWNDPARENT`) that allowed shell hosts to cover the keyboard.
+  - **Taskbar Window Suppression**: Explicitly cleared `WS_EX_APPWINDOW` (`0x0004_0000`) so the virtual keyboard overlay never appears in the Windows taskbar, alt-tab, or thumbnail previews.
+- **Continuous Gamepad Control in Settings**:
+  - Fixed gamepad desktop mouse control freezing/pausing whenever the Reverse Controller Settings window was opened or maximized.
+  - Reverse Controller's own executables and Settings windows are now explicitly excluded from fullscreen game pause checks (`is_fullscreen()` and `fullscreen_paused()`).
+- **Eliminated Controller Dropouts ("اليد تفصل فجأة")**:
+  - Added a 15-consecutive-poll (~120ms) debounce counter to XInput polling, absorbing momentary wireless, Bluetooth, and 2.4GHz packet jitter without falsely declaring disconnection, rumble resets, or OSD battery popups.
+  - Moved profile disk I/O outside of the engine mutex lock to eliminate input loop stalls and watchdog input releases.
+- **Auto-Show Virtual Keyboard on Text Box Click**:
+  - Resolved race condition where `take_text_click()` consumed the click while the controller button was held down.
+  - Added zero-latency I-Beam cursor shape detection (`IDC_IBEAM` handle, shared image, and centered hotspot geometry) and focused-control detection, allowing instant virtual keyboard popups when clicking text boxes in Chrome, Edge, Discord, Telegram, VS Code, Windows 11 Settings, and Start Menu.
+- **AltSnap Polish (RamonUnch-style Experience)**:
+  - **Proportional Cursor Pinning**: Restoring/unmaximizing maximized windows by dragging now pins the cursor proportionally to the restored window width, exactly matching original AltSnap and Windows titlebar dragging.
+  - **Authentic Cursor Shape Feedback**: Dynamically displays `IDC_SIZEALL` during window move, directional resize cursors (`IDC_SIZENWSE`, `IDC_SIZENESW`, `IDC_SIZEWE`, `IDC_SIZENS`) during resizing, and cleanly restores to `IDC_ARROW` on release or `Esc`.
+  - **Window-to-Window Snapping**: Added magnetic border snapping against other visible top-level windows in addition to screen borders.
+
+---
+
 ## [v1.3.2] — 2026-10-18
 
 ### 🚀 Highlights & Critical Bug Fixes

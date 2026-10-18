@@ -565,11 +565,11 @@ fn main() {
 
                         let immediate = platform::take_text_click();
                         let is_ctrl = platform::last_click_was_controller();
-                        let recent_click = platform::last_click_within_ms(350);
+                        let recent_click = platform::last_click_within_ms(500);
                         let is_dragging = platform::is_controller_dragging();
                         let lbutton_down = platform::is_controller_lbutton_down();
-                        let is_text = is_ctrl && recent_click && !is_dragging && !lbutton_down && platform::caret_active();
-                        if is_ctrl && !is_dragging && !lbutton_down && (immediate || is_text) {
+                        let is_ibeam = platform::is_cursor_ibeam();
+                        if is_ctrl && !is_dragging && !lbutton_down && (immediate || (recent_click && is_ibeam)) {
                             let was_vis = f2.load(Ordering::SeqCst);
                             if !was_vis {
                                 crate::platform::log_debug("[main] Text click detected -> surfacing virtual keyboard");
@@ -748,23 +748,24 @@ fn main() {
                     cached = Some((exe.clone(), crate::profiles::match_process(&dir, &exe), Instant::now()));
                 }
                 let Some((_, hit, _)) = &cached else { continue };
-                let Ok(mut e) = sw_engine.lock() else { continue };
-                match hit {
-                    Some(h) => {
-                        let stem = h.path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                        if e.auto_profile() == Some(stem.as_str()) {
-                            continue;
-                        }
-                        match crate::profiles::load(&h.path) {
-                            Ok(p) => {
+                if let Some(h) = hit {
+                    let stem = h.path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let already_active = sw_engine.lock().map(|e| e.auto_profile() == Some(stem.as_str())).unwrap_or(false);
+                    if already_active {
+                        continue;
+                    }
+                    match crate::profiles::load(&h.path) {
+                        Ok(p) => {
+                            if let Ok(mut e) = sw_engine.lock() {
                                 println!("[main] auto-switch -> '{stem}' for {exe}");
                                 e.set_auto_profile(&stem, p.bindings);
                                 crate::osd::show_profile(&stem);
                             }
-                            Err(err) => eprintln!("[main] auto-switch to '{stem}' failed: {err}"),
                         }
+                        Err(err) => eprintln!("[main] auto-switch to '{stem}' failed: {err}"),
                     }
-                    None if e.auto_profile().is_some() => {
+                } else if let Ok(mut e) = sw_engine.lock() {
+                    if e.auto_profile().is_some() {
                         e.clear_auto_profile();
                         let name = if e.config().active_profile.is_empty() {
                             crate::profiles::DEFAULT_NAME.to_string()
@@ -774,7 +775,6 @@ fn main() {
                         println!("[main] auto-switch back to '{name}'");
                         crate::osd::show_profile(&name);
                     }
-                    None => {}
                 }
             }
         });

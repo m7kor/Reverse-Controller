@@ -275,6 +275,7 @@ pub fn clear_last_click() {
 static CONTROLLER_LBUTTON_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static CLICK_START_POS: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
 static IS_DRAGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CLICK_WAS_IBEAM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Record a controller left-click natively in-process. Inspects text-box status
 /// immediately without any low-level OS mouse hooks.
@@ -284,6 +285,7 @@ pub fn note_controller_left_click() {
     LAST_CLICK_WAS_CONTROLLER.store(true, std::sync::atomic::Ordering::SeqCst);
     CONTROLLER_LBUTTON_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
     IS_DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
+    CLICK_WAS_IBEAM.store(is_cursor_ibeam(), std::sync::atomic::Ordering::SeqCst);
     push_foreground();
     // Only remember where the click landed. Deciding whether that is a text
     // box can mean a cross-process accessibility query, which blocks while
@@ -326,6 +328,7 @@ pub fn check_controller_drag() {
                     if dx > 8 || dy > 8 {
                         IS_DRAGGING.store(true, std::sync::atomic::Ordering::SeqCst);
                         CLICK_IN_TEXT.store(false, std::sync::atomic::Ordering::SeqCst);
+                        CLICK_WAS_IBEAM.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
@@ -343,10 +346,16 @@ static PENDING_CLICK: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::n
 /// Classify a pending controller click (call from a background thread).
 fn classify_pending_click() {
     let pending = PENDING_CLICK.lock().ok().and_then(|mut p| p.take());
+    let was_ibeam = CLICK_WAS_IBEAM.swap(false, std::sync::atomic::Ordering::SeqCst);
+    if is_controller_dragging() {
+        return;
+    }
     if let Some((x, y)) = pending {
-        if !is_controller_dragging() && point_is_text_field(POINT { x, y }) {
+        if was_ibeam || point_is_text_field(POINT { x, y }) {
             CLICK_IN_TEXT.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+    } else if was_ibeam {
+        CLICK_IN_TEXT.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -453,21 +462,54 @@ pub fn cursor_is_hand() -> bool {
     }
 }
 
-#[allow(dead_code)]
 pub fn is_cursor_ibeam() -> bool {
     #[link(name = "user32")]
     extern "system" {
         fn GetCursorInfo(pci: *mut CURSORINFO) -> BOOL;
         fn LoadCursorW(inst: HINSTANCE, name: usize) -> HCURSOR;
+        fn LoadImageW(
+            hinst: HINSTANCE,
+            lpszName: usize,
+            uType: u32,
+            cxDesired: i32,
+            cyDesired: i32,
+            fuLoad: u32,
+        ) -> *mut c_void;
+        fn GetIconInfo(hIcon: HCURSOR, piconinfo: *mut ICONINFO) -> BOOL;
     }
     unsafe {
         let mut ci: CURSORINFO = std::mem::zeroed();
         ci.cbSize = std::mem::size_of::<CURSORINFO>() as DWORD;
         if GetCursorInfo(&mut ci) != 0 && ci.flags != 0 && !ci.hCursor.is_null() {
-            // Direct handle match with system default IDC_IBEAM (32513)
+            // 1. Direct handle match with system default IDC_IBEAM (32513)
             let ibeam = LoadCursorW(std::ptr::null_mut(), 32513);
             if !ibeam.is_null() && ci.hCursor == ibeam {
                 return true;
+            }
+            // 2. Shared cursor image match (OCR_IBEAM = 32513)
+            let ocr_ibeam = LoadImageW(
+                std::ptr::null_mut(),
+                32513,
+                2, // IMAGE_CURSOR
+                0,
+                0,
+                0x00008000, // LR_SHARED
+            );
+            if !ocr_ibeam.is_null() && ci.hCursor == ocr_ibeam as HCURSOR {
+                return true;
+            }
+            // 3. Hotspot check: standard arrow has hotspot (0, 0), whereas I-beam hotspot is centered
+            let mut ii: ICONINFO = std::mem::zeroed();
+            if GetIconInfo(ci.hCursor, &mut ii) != 0 {
+                if !ii.hbmMask.is_null() {
+                    DeleteObject(ii.hbmMask);
+                }
+                if !ii.hbmColor.is_null() {
+                    DeleteObject(ii.hbmColor);
+                }
+                if ii.xHotspot >= 3 && ii.yHotspot >= 4 && (ii.xHotspot as i32 - ii.yHotspot as i32).abs() <= 6 {
+                    return true;
+                }
             }
         }
         false
@@ -528,6 +570,11 @@ pub fn check_accessible_text(pt: POINT) -> bool {
 /// Avoids slow cross-process COM (`AccessibleObjectFromPoint`) or false-positive
 /// I-Beam checks inside the low-level mouse hook.
 fn point_is_text_field(pt: POINT) -> bool {
+    // 1. If pointer is an I-Beam, it is unequivocally an editable text area!
+    if is_cursor_ibeam() {
+        return true;
+    }
+
     unsafe {
         let under = WindowFromPoint(pt);
         if under.is_null() {
@@ -543,9 +590,10 @@ fn point_is_text_field(pt: POINT) -> bool {
             return false;
         }
 
-        // 1. If click lands inside Windows Taskbar or Desktop (or any of their child controls),
-        // it is selecting programs/files/windows, NOT entering text.
+        // 2. If click lands inside Windows Taskbar or Desktop (or any of their child controls),
+        // check whether search box or focused caret is active.
         let mut cur = under;
+        let mut is_shell = false;
         while !cur.is_null() {
             let mut buf = [0u16; 64];
             let len = GetClassNameW(cur, buf.as_mut_ptr(), 64);
@@ -558,7 +606,8 @@ fn point_is_text_field(pt: POINT) -> bool {
                     || c == "Progman"
                     || c == "WorkerW"
                 {
-                    return caret_active();
+                    is_shell = true;
+                    break;
                 }
             }
             let parent = GetParent(cur);
@@ -567,33 +616,40 @@ fn point_is_text_field(pt: POINT) -> bool {
             }
             cur = parent;
         }
+        if is_shell {
+            return caret_active() || check_accessible_text(pt);
+        }
     }
 
     let class = window_class_at(pt);
     let class_name = class.as_deref().unwrap_or("");
 
-    // 2. If click lands inside Explorer file list, it's selecting files.
+    // 3. If click lands inside Explorer file list, it's selecting files unless rename edit box is open.
     if class_name == "SysListView32"
         || class_name == "SHELLDLL_DefView"
-        || class_name == "DirectUIHWND"
         || class_name == "CabinetWClass"
         || class_name == "ShellTabWindowClass"
         || class_name == "XamlExplorerHostIslandWindow"
     {
-        return caret_active();
+        return caret_active() || check_accessible_text(pt);
     }
 
-    // 3. Known native edit class.
+    // 4. Known native edit class.
     if EDIT_CLASSES.iter().any(|e| class_name.starts_with(e)) {
         return true;
     }
 
-    // 4. A real caret on the foreground thread.
+    // 5. A real caret on the foreground thread.
     if caret_active() {
         return true;
     }
 
-    // 5. Query MSAA to catch modern WinUI/XAML (Settings search, Start Menu search), Chrome, Discord, etc.
+    // 6. Modern Chromium / Electron / WinUI focused control under cursor.
+    if focused_window_under_cursor() {
+        return true;
+    }
+
+    // 7. Query MSAA to catch modern WinUI/XAML (Settings search, Start Menu search), Chrome, Discord, etc.
     check_accessible_text(pt)
 }
 
@@ -655,6 +711,11 @@ pub fn mouse_watch_start() {}
 /// Consume the "clicked inside a text box" edge (true at most once per click).
 /// Classifies a pending click first, so call this off the input thread.
 pub fn take_text_click() -> bool {
+    // If the controller button is still held down, wait until release to confirm
+    // whether the user is just clicking or dragging to select text!
+    if is_controller_lbutton_down() {
+        return false;
+    }
     classify_pending_click();
     CLICK_IN_TEXT.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
@@ -837,20 +898,9 @@ pub fn place_window(title: &str, x: i32, y: i32, w: i32, h: i32) -> bool {
         if hwnd.is_null() {
             return false;
         }
-        let is_shell = is_system_shell_foreground();
-        if is_shell {
-            let fg = GetForegroundWindow();
-            if !fg.is_null() && fg != hwnd {
-                let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);
-                if cur_parent != fg as isize {
-                    SetWindowLongPtrW(hwnd, -8, fg as isize);
-                }
-            }
-        } else {
-            let cur_parent = GetWindowLongPtrW(hwnd, -8);
-            if cur_parent != 0 {
-                SetWindowLongPtrW(hwnd, -8, 0);
-            }
+        let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);
+        if cur_parent != 0 {
+            SetWindowLongPtrW(hwnd, -8, 0);
         }
         SetWindowPos(
             hwnd,
@@ -860,15 +910,6 @@ pub fn place_window(title: &str, x: i32, y: i32, w: i32, h: i32) -> bool {
             w,
             h,
             SWP_NOACTIVATE | async_flag(hwnd),
-        );
-        SetWindowPos(
-            hwnd,
-            0 as HWND,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd),
         );
         true
     }
@@ -900,22 +941,11 @@ pub fn move_window(title: &str, x: i32, y: i32) -> bool {
             0,
             flags,
         );
-        if !is_hidden {
-            SetWindowPos(
-                hwnd,
-                0 as HWND,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd),
-            );
-        }
         true
     }
 }
 
-/// Reassert HWND_TOPMOST and HWND_TOP so the overlay stays in front of system flyouts
+/// Reassert HWND_TOPMOST so the overlay strictly stays in front of system flyouts
 /// (such as Windows 11 SearchHost.exe or StartMenuExperienceHost.exe)
 /// without stealing focus.
 pub fn bring_to_top(title: &str) -> bool {
@@ -924,33 +954,13 @@ pub fn bring_to_top(title: &str) -> bool {
         if hwnd.is_null() {
             return false;
         }
-        let is_shell = is_system_shell_foreground();
-        if is_shell {
-            let fg = GetForegroundWindow();
-            if !fg.is_null() && fg != hwnd {
-                let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);
-                if cur_parent != fg as isize {
-                    SetWindowLongPtrW(hwnd, -8, fg as isize);
-                }
-            }
-        } else {
-            let cur_parent = GetWindowLongPtrW(hwnd, -8);
-            if cur_parent != 0 {
-                SetWindowLongPtrW(hwnd, -8, 0);
-            }
+        let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);
+        if cur_parent != 0 {
+            SetWindowLongPtrW(hwnd, -8, 0);
         }
         SetWindowPos(
             hwnd,
             (-1isize) as HWND,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd),
-        );
-        SetWindowPos(
-            hwnd,
-            0 as HWND,
             0,
             0,
             0,
@@ -998,6 +1008,24 @@ pub fn is_fullscreen() -> bool {
             }
         }
 
+        // Check window title: Reverse Controller's own windows (Settings, etc.) are never fullscreen games
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetWindowTextW(hWnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
+        }
+        let mut title_buf = [0u16; 128];
+        let title_len = GetWindowTextW(w, title_buf.as_mut_ptr(), title_buf.len() as i32);
+        if title_len > 0 {
+            let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
+            if title.contains("Reverse Controller")
+                || title.contains("Controller Companion")
+                || title.contains("Settings")
+                || title.contains("الإعدادات")
+            {
+                return false;
+            }
+        }
+
         // Known Windows system, shell, and Settings processes are never fullscreen games
         if let Some(exe) = foreground_process_name() {
             let exe_lower = exe.to_lowercase();
@@ -1009,6 +1037,11 @@ pub fn is_fullscreen() -> bool {
                 || exe_lower == "textinputhost.exe"
                 || exe_lower == "applicationframehost.exe"
                 || exe_lower == "lockapp.exe"
+                || exe_lower == "reversecontroller.exe"
+                || exe_lower == "reverse-controller.exe"
+                || exe_lower == "controller-companion.exe"
+                || exe_lower.contains("reverse")
+                || exe_lower.contains("companion")
             {
                 return false;
             }
@@ -1052,6 +1085,10 @@ pub fn set_window_visible(title: &str, visible: bool) -> bool {
             ShowWindow(hwnd, cmd);
         }
         if visible {
+            let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);
+            if cur_parent != 0 {
+                SetWindowLongPtrW(hwnd, -8, 0);
+            }
             SetWindowPos(
                 hwnd,
                 (-1isize) as HWND,
@@ -1086,9 +1123,9 @@ pub fn enforce_overlay_style(title: &str, backdrop: bool) -> bool {
             return false;
         }
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        // WS_EX_NOACTIVATE keeps the user's text box focused while the overlay is
-        // on screen.
-        let want = style | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        // Clear WS_EX_APPWINDOW (0x0004_0000) so the overlay window never leaks into the Windows taskbar or alt-tab thumbnails!
+        const WS_EX_APPWINDOW: isize = 0x0004_0000;
+        let want = (style & !WS_EX_APPWINDOW) | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
         if want != style {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
             const SWP_FRAMECHANGED: u32 = 0x0020;
@@ -1104,6 +1141,10 @@ pub fn enforce_overlay_style(title: &str, backdrop: bool) -> bool {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
+        }
+        let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);
+        if cur_parent != 0 {
+            SetWindowLongPtrW(hwnd, -8, 0);
         }
         // Enable Windows 11 immersive dark mode and rounded corner preference
         let dark_mode: BOOL = 1;
