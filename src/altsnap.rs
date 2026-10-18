@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 type HWND = *mut c_void;
@@ -116,6 +116,18 @@ extern "system" {
     fn PostMessageW(hWnd: HWND, Msg: u32, wParam: WPARAM, lParam: LPARAM) -> BOOL;
     fn GetAsyncKeyState(vKey: i32) -> i16;
     fn SetForegroundWindow(hWnd: HWND) -> BOOL;
+    fn GetWindowPlacement(hWnd: HWND, lpwndpl: *mut WINDOWPLACEMENT) -> BOOL;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct WINDOWPLACEMENT {
+    pub length: u32,
+    pub flags: u32,
+    pub showCmd: u32,
+    pub ptMinPosition: POINT,
+    pub ptMaxPosition: POINT,
+    pub rcNormalPosition: RECT,
 }
 
 #[link(name = "dwmapi")]
@@ -161,23 +173,51 @@ static WINDOW_OPACITY: Mutex<Option<HashMap<usize, u8>>> = Mutex::new(None);
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static GLOBAL_CONFIG: Mutex<Option<Arc<Mutex<crate::config::Config>>>> = Mutex::new(None);
 
+pub static ALTSNAP_ENABLED: AtomicBool = AtomicBool::new(true);
+pub static ALTSNAP_MODIFIER_VK: AtomicU32 = AtomicU32::new(0x12);
+pub static ALTSNAP_SNAP_DIST: AtomicI32 = AtomicI32::new(15);
+pub static ALTSNAP_SNAP_EDGES: AtomicBool = AtomicBool::new(true);
+pub static ALTSNAP_AUTO_MAXIMIZE: AtomicBool = AtomicBool::new(true);
+pub static ALTSNAP_TRANSPARENCY_STEP: AtomicU8 = AtomicU8::new(20);
+pub static IS_DRAGGING: AtomicBool = AtomicBool::new(false);
+
 #[derive(Clone, Debug)]
 enum MouseDragMode {
     Move {
         hwnd: usize,
         start_cursor: (i32, i32),
         start_window_rect: (i32, i32, i32, i32), // (left, top, width, height)
-        visual_offset: (i32, i32),                // (frame_left - rect_left, frame_top - rect_top)
+        borders: (i32, i32, i32, i32),           // (border_left, border_top, border_right, border_bottom)
+        last_pos: (i32, i32),
+        last_time: u32,
     },
     Resize {
         hwnd: usize,
         start_cursor: (i32, i32),
         start_window_rect: (i32, i32, i32, i32),
         quadrant: ResizeQuadrant,
+        last_rect: (i32, i32, i32, i32),
+        last_time: u32,
     },
 }
 
 static ACTIVE_DRAG: Mutex<Option<MouseDragMode>> = Mutex::new(None);
+
+/// Update lock-free atomics from configuration so low-level hooks never block on mutexes.
+pub fn update_config(cfg: &crate::config::AltSnapSettings) {
+    ALTSNAP_ENABLED.store(cfg.enabled, Ordering::Relaxed);
+    let vk = match cfg.modifier.as_str() {
+        "Ctrl" => 0x11,
+        "Shift" => 0x10,
+        "Win" => 0x5B,
+        _ => 0x12,
+    };
+    ALTSNAP_MODIFIER_VK.store(vk, Ordering::Relaxed);
+    ALTSNAP_SNAP_DIST.store(cfg.snap_distance, Ordering::Relaxed);
+    ALTSNAP_SNAP_EDGES.store(cfg.snap_to_edges, Ordering::Relaxed);
+    ALTSNAP_AUTO_MAXIMIZE.store(cfg.auto_maximize, Ordering::Relaxed);
+    ALTSNAP_TRANSPARENCY_STEP.store(cfg.transparency_step, Ordering::Relaxed);
+}
 
 pub fn get_hook_thread_id() -> u32 {
     HOOK_THREAD_ID.load(Ordering::SeqCst)
@@ -703,50 +743,20 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
     }
 
-    // Fast path: if no drag is currently active, check if modifier keys are pressed.
-    // (Alt = 0x12, Ctrl = 0x11, Win = 0x5B/0x5C, Shift = 0x10)
-    let alt_down = (GetAsyncKeyState(0x12) as u16 & 0x8000) != 0;
-    let ctrl_down = (GetAsyncKeyState(0x11) as u16 & 0x8000) != 0;
-    let win_down = (GetAsyncKeyState(0x5B) as u16 & 0x8000) != 0 || (GetAsyncKeyState(0x5C) as u16 & 0x8000) != 0;
-    let shift_down = (GetAsyncKeyState(0x10) as u16 & 0x8000) != 0;
-
-    let has_active_drag = if let Ok(drag) = ACTIVE_DRAG.lock() {
-        drag.is_some()
-    } else {
-        false
-    };
-
-    if !alt_down && !ctrl_down && !win_down && !shift_down && !has_active_drag {
+    if !ALTSNAP_ENABLED.load(Ordering::Relaxed) {
         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
     }
 
-    // Read config settings
-    let (enabled, modifier, snap_dist, snap_edges, auto_max, step) = if let Ok(guard) = GLOBAL_CONFIG.lock() {
-        if let Some(arc) = guard.as_ref() {
-            if let Ok(cfg) = arc.lock() {
-                (
-                    cfg.altsnap.enabled,
-                    cfg.altsnap.modifier.clone(),
-                    cfg.altsnap.snap_distance,
-                    cfg.altsnap.snap_to_edges,
-                    cfg.altsnap.auto_maximize,
-                    cfg.altsnap.transparency_step,
-                )
-            } else {
-                (true, "Alt".to_string(), 15, true, true, 20)
-            }
-        } else {
-            (true, "Alt".to_string(), 15, true, true, 20)
-        }
-    } else {
-        (true, "Alt".to_string(), 15, true, true, 20)
-    };
+    let is_dragging = IS_DRAGGING.load(Ordering::Relaxed);
+    let mod_vk = ALTSNAP_MODIFIER_VK.load(Ordering::Relaxed) as i32;
+    let mod_down = (GetAsyncKeyState(mod_vk) as u16 & 0x8000) != 0;
 
-    if !enabled {
+    // Fast-path: If no drag is active and modifier key is not down, immediately pass through.
+    // 0 mutex locks, 0 allocations, 0 latency.
+    if !is_dragging && !mod_down {
         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
     }
 
-    let mod_down = is_modifier_down(&modifier);
     let hook_struct = &*(lparam as *const MSLLHOOKSTRUCT);
     let pt = hook_struct.pt;
 
@@ -755,27 +765,34 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
             if let Some(hwnd) = get_window_under_cursor() {
                 SetForegroundWindow(hwnd);
                 let (win_x, win_y, win_w, win_h) = if IsZoomed(hwnd) != 0 {
+                    let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+                    wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+                    let (mut rw, mut rh) = (960, 600);
+                    if GetWindowPlacement(hwnd, &mut wp) != 0 {
+                        let nw = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+                        let nh = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+                        if nw > 200 && nh > 150 {
+                            rw = nw;
+                            rh = nh;
+                        }
+                    }
                     ShowWindow(hwnd, SW_RESTORE);
-                    let mut r: RECT = std::mem::zeroed();
-                    GetWindowRect(hwnd, &mut r);
-                    let w = (r.right - r.left).max(200);
-                    let h = (r.bottom - r.top).max(150);
-                    let x = pt.x - w / 2;
-                    let y = pt.y - 20;
+                    let x = pt.x - rw / 2;
+                    let y = (pt.y - 20).max(0);
                     SetWindowPos(
                         hwnd,
                         std::ptr::null_mut(),
                         x,
                         y,
-                        w,
-                        h,
+                        rw,
+                        rh,
                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
                     );
-                    (x, y, w, h)
+                    (x, y, rw, rh)
                 } else {
                     let mut r: RECT = std::mem::zeroed();
                     GetWindowRect(hwnd, &mut r);
-                    (r.left, r.top, r.right - r.left, r.bottom - r.top)
+                    (r.left, r.top, (r.right - r.left).max(100), (r.bottom - r.top).max(50))
                 };
 
                 let frame = get_window_frame_rect(hwnd).unwrap_or(RECT {
@@ -784,18 +801,23 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                     right: win_x + win_w,
                     bottom: win_y + win_h,
                 });
-                let vis_off_x = frame.left - win_x;
-                let vis_off_y = frame.top - win_y;
+                let border_left = (frame.left - win_x).max(0);
+                let border_top = (frame.top - win_y).max(0);
+                let border_right = ((win_x + win_w) - frame.right).max(0);
+                let border_bottom = ((win_y + win_h) - frame.bottom).max(0);
 
                 if let Ok(mut drag) = ACTIVE_DRAG.lock() {
                     *drag = Some(MouseDragMode::Move {
                         hwnd: hwnd as usize,
                         start_cursor: (pt.x, pt.y),
                         start_window_rect: (win_x, win_y, win_w, win_h),
-                        visual_offset: (vis_off_x, vis_off_y),
+                        borders: (border_left, border_top, border_right, border_bottom),
+                        last_pos: (win_x, win_y),
+                        last_time: hook_struct.time,
                     });
+                    IS_DRAGGING.store(true, Ordering::Relaxed);
                 }
-                return 1; // Intercept click
+                return 1;
             }
         }
         WM_RBUTTONDOWN if mod_down => {
@@ -807,17 +829,20 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                 let mut rect: RECT = std::mem::zeroed();
                 if GetWindowRect(hwnd, &mut rect) != 0 {
                     let quad = detect_resize_quadrant(&rect, pt.x, pt.y);
-                    let w = rect.right - rect.left;
-                    let h = rect.bottom - rect.top;
+                    let w = (rect.right - rect.left).max(100);
+                    let h = (rect.bottom - rect.top).max(50);
                     if let Ok(mut drag) = ACTIVE_DRAG.lock() {
                         *drag = Some(MouseDragMode::Resize {
                             hwnd: hwnd as usize,
                             start_cursor: (pt.x, pt.y),
                             start_window_rect: (rect.left, rect.top, w, h),
                             quadrant: quad,
+                            last_rect: (rect.left, rect.top, w, h),
+                            last_time: hook_struct.time,
                         });
+                        IS_DRAGGING.store(true, Ordering::Relaxed);
                     }
-                    return 1; // Intercept right click
+                    return 1;
                 }
             }
         }
@@ -829,25 +854,61 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
         }
         WM_MOUSEWHEEL if mod_down => {
             if let Some(hwnd) = get_window_under_cursor() {
+                let step = ALTSNAP_TRANSPARENCY_STEP.load(Ordering::Relaxed);
                 cycle_transparency(hwnd, step);
                 return 1;
             }
         }
         WM_MOUSEMOVE => {
-            let drag_opt = if let Ok(drag) = ACTIVE_DRAG.lock() {
-                drag.clone()
+            // Cancel drag if Escape key is pressed
+            if (GetAsyncKeyState(0x1B /* VK_ESCAPE */) as u16 & 0x8000) != 0 {
+                if let Ok(mut drag) = ACTIVE_DRAG.lock() {
+                    if let Some(mode) = drag.take() {
+                        IS_DRAGGING.store(false, Ordering::Relaxed);
+                        match mode {
+                            MouseDragMode::Move { hwnd, start_window_rect, .. }
+                            | MouseDragMode::Resize { hwnd, start_window_rect, .. } => {
+                                SetWindowPos(
+                                    hwnd as HWND,
+                                    std::ptr::null_mut(),
+                                    start_window_rect.0,
+                                    start_window_rect.1,
+                                    start_window_rect.2,
+                                    start_window_rect.3,
+                                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                                );
+                            }
+                        }
+                    }
+                }
+                return 1;
+            }
+
+            let drag_opt = if let Ok(mut drag) = ACTIVE_DRAG.lock() {
+                drag.take()
             } else {
                 None
             };
 
-            if let Some(mode) = drag_opt {
-                match mode {
+            if let Some(mut mode) = drag_opt {
+                let snap_edges = ALTSNAP_SNAP_EDGES.load(Ordering::Relaxed);
+                let snap_dist = ALTSNAP_SNAP_DIST.load(Ordering::Relaxed);
+
+                match &mut mode {
                     MouseDragMode::Move {
                         hwnd,
                         start_cursor,
                         start_window_rect,
-                        visual_offset,
+                        borders,
+                        last_pos,
+                        last_time,
                     } => {
+                        // Safety check: Is left mouse button physically down?
+                        if (GetAsyncKeyState(0x01 /* VK_LBUTTON */) as u16 & 0x8000) == 0 {
+                            IS_DRAGGING.store(false, Ordering::Relaxed);
+                            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                        }
+
                         let raw_dx = pt.x - start_cursor.0;
                         let raw_dy = pt.y - start_cursor.1;
 
@@ -861,33 +922,49 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                             let wa_right = wa_x + wa_w;
                             let wa_bottom = wa_y + wa_h;
 
-                            let vis_x = outer_x + visual_offset.0;
-                            let vis_y = outer_y + visual_offset.1;
-                            let vis_w = width - visual_offset.0 * 2;
-                            let vis_h = height - visual_offset.1;
+                            let vis_x = outer_x + borders.0;
+                            let vis_y = outer_y + borders.1;
+                            let vis_w = width - borders.0 - borders.2;
+                            let vis_h = height - borders.1 - borders.3;
 
-                            if (vis_x - wa_x).abs() <= snap_dist {
-                                outer_x = wa_x - visual_offset.0;
-                            } else if (vis_x + vis_w - wa_right).abs() <= snap_dist {
-                                outer_x = wa_right - vis_w - visual_offset.0;
+                            // Prevent edge trap: Only snap horizontally if window width is comfortably smaller than monitor
+                            if vis_w < wa_w - snap_dist * 3 {
+                                if (vis_x - wa_x).abs() <= snap_dist {
+                                    outer_x = wa_x - borders.0;
+                                } else if (vis_x + vis_w - wa_right).abs() <= snap_dist {
+                                    outer_x = wa_right - vis_w - borders.0;
+                                }
                             }
 
-                            if (vis_y - wa_y).abs() <= snap_dist {
-                                outer_y = wa_y - visual_offset.1;
-                            } else if (vis_y + vis_h - wa_bottom).abs() <= snap_dist {
-                                outer_y = wa_bottom - vis_h - visual_offset.1;
+                            // Prevent edge trap: Only snap vertically if window height is comfortably smaller than monitor
+                            if vis_h < wa_h - snap_dist * 3 {
+                                if (vis_y - wa_y).abs() <= snap_dist {
+                                    outer_y = wa_y - borders.1;
+                                } else if (vis_y + vis_h - wa_bottom).abs() <= snap_dist {
+                                    outer_y = wa_bottom - vis_h - borders.1;
+                                }
                             }
                         }
 
-                        SetWindowPos(
-                            hwnd as HWND,
-                            std::ptr::null_mut(),
-                            outer_x,
-                            outer_y,
-                            0,
-                            0,
-                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-                        );
+                        if (outer_x != last_pos.0 || outer_y != last_pos.1)
+                            && (hook_struct.time.wrapping_sub(*last_time) >= 8 || (outer_x != last_pos.0 && outer_y != last_pos.1))
+                        {
+                            *last_pos = (outer_x, outer_y);
+                            *last_time = hook_struct.time;
+                            SetWindowPos(
+                                *hwnd as HWND,
+                                std::ptr::null_mut(),
+                                outer_x,
+                                outer_y,
+                                0,
+                                0,
+                                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                            );
+                        }
+
+                        if let Ok(mut drag) = ACTIVE_DRAG.lock() {
+                            *drag = Some(mode);
+                        }
                         return 1;
                     }
                     MouseDragMode::Resize {
@@ -895,7 +972,15 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                         start_cursor,
                         start_window_rect,
                         quadrant,
+                        last_rect,
+                        last_time,
                     } => {
+                        // Safety check: Is right mouse button physically down?
+                        if (GetAsyncKeyState(0x02 /* VK_RBUTTON */) as u16 & 0x8000) == 0 {
+                            IS_DRAGGING.store(false, Ordering::Relaxed);
+                            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                        }
+
                         let raw_dx = pt.x - start_cursor.0;
                         let raw_dy = pt.y - start_cursor.1;
 
@@ -908,7 +993,7 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                         let min_w = 160;
                         let min_h = 100;
 
-                        match quadrant {
+                        match *quadrant {
                             ResizeQuadrant::TopLeft => {
                                 let nw = (width - raw_dx).max(min_w);
                                 left += width - nw;
@@ -956,68 +1041,90 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
                             let wa_right = wa_x + wa_w;
                             let wa_bottom = wa_y + wa_h;
 
-                            if matches!(quadrant, ResizeQuadrant::TopLeft | ResizeQuadrant::BottomLeft | ResizeQuadrant::Left)
+                            if matches!(*quadrant, ResizeQuadrant::TopLeft | ResizeQuadrant::BottomLeft | ResizeQuadrant::Left)
                                 && (left - wa_x).abs() <= snap_dist
                             {
                                 width += left - wa_x;
                                 left = wa_x;
                             }
-                            if matches!(quadrant, ResizeQuadrant::TopRight | ResizeQuadrant::BottomRight | ResizeQuadrant::Right)
+                            if matches!(*quadrant, ResizeQuadrant::TopRight | ResizeQuadrant::BottomRight | ResizeQuadrant::Right)
                                 && (left + width - wa_right).abs() <= snap_dist
                             {
                                 width = wa_right - left;
                             }
-                            if matches!(quadrant, ResizeQuadrant::TopLeft | ResizeQuadrant::TopRight | ResizeQuadrant::Top)
+                            if matches!(*quadrant, ResizeQuadrant::TopLeft | ResizeQuadrant::TopRight | ResizeQuadrant::Top)
                                 && (top - wa_y).abs() <= snap_dist
                             {
                                 height += top - wa_y;
                                 top = wa_y;
                             }
-                            if matches!(quadrant, ResizeQuadrant::BottomLeft | ResizeQuadrant::BottomRight | ResizeQuadrant::Bottom)
+                            if matches!(*quadrant, ResizeQuadrant::BottomLeft | ResizeQuadrant::BottomRight | ResizeQuadrant::Bottom)
                                 && (top + height - wa_bottom).abs() <= snap_dist
                             {
                                 height = wa_bottom - top;
                             }
                         }
 
-                        SetWindowPos(
-                            hwnd as HWND,
-                            std::ptr::null_mut(),
-                            left,
-                            top,
-                            width,
-                            height,
-                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-                        );
+                        let cur_rect = (left, top, width, height);
+                        if cur_rect != *last_rect && hook_struct.time.wrapping_sub(*last_time) >= 8 {
+                            *last_rect = cur_rect;
+                            *last_time = hook_struct.time;
+                            SetWindowPos(
+                                *hwnd as HWND,
+                                std::ptr::null_mut(),
+                                left,
+                                top,
+                                width,
+                                height,
+                                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                            );
+                        }
+
+                        if let Ok(mut drag) = ACTIVE_DRAG.lock() {
+                            *drag = Some(mode);
+                        }
                         return 1;
                     }
                 }
             }
         }
         WM_LBUTTONUP => {
+            IS_DRAGGING.store(false, Ordering::Relaxed);
             let was_dragging = if let Ok(mut drag) = ACTIVE_DRAG.lock() {
-                if let Some(MouseDragMode::Move { hwnd, .. }) = drag.take() {
-                    Some(hwnd)
-                } else {
-                    None
-                }
+                drag.take()
             } else {
                 None
             };
 
-            if let Some(hwnd) = was_dragging {
-                if auto_max {
-                    let (_wa_x, wa_y, _wa_w, _wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+            if let Some(MouseDragMode::Move { hwnd, .. }) = was_dragging {
+                if ALTSNAP_AUTO_MAXIMIZE.load(Ordering::Relaxed) {
+                    let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+                    let wa_right = wa_x + wa_w;
+                    let wa_bottom = wa_y + wa_h;
+
                     if pt.y <= wa_y + 4 {
                         ShowWindowAsync(hwnd as HWND, SW_MAXIMIZE);
+                    } else if pt.x <= wa_x + 6 && pt.y <= wa_y + 40 {
+                        snap_window(hwnd as HWND, SnapQuadrant::TopLeft);
+                    } else if pt.x >= wa_right - 6 && pt.y <= wa_y + 40 {
+                        snap_window(hwnd as HWND, SnapQuadrant::TopRight);
+                    } else if pt.x <= wa_x + 6 && pt.y >= wa_bottom - 40 {
+                        snap_window(hwnd as HWND, SnapQuadrant::BottomLeft);
+                    } else if pt.x >= wa_right - 6 && pt.y >= wa_bottom - 40 {
+                        snap_window(hwnd as HWND, SnapQuadrant::BottomRight);
+                    } else if pt.x <= wa_x + 6 {
+                        snap_window(hwnd as HWND, SnapQuadrant::LeftHalf);
+                    } else if pt.x >= wa_right - 6 {
+                        snap_window(hwnd as HWND, SnapQuadrant::RightHalf);
                     }
                 }
                 return 1;
             }
         }
         WM_RBUTTONUP => {
+            IS_DRAGGING.store(false, Ordering::Relaxed);
             let was_resizing = if let Ok(mut drag) = ACTIVE_DRAG.lock() {
-                matches!(drag.take(), Some(MouseDragMode::Resize { .. }))
+                drag.take().is_some()
             } else {
                 false
             };
@@ -1034,6 +1141,9 @@ unsafe extern "system" fn altsnap_mouse_proc(code: i32, wparam: usize, lparam: i
 
 /// Start background low-level mouse hook for AltSnap desktop mouse operations.
 pub fn start_mouse_hook(running: Arc<AtomicBool>, config: Arc<Mutex<crate::config::Config>>) {
+    if let Ok(cfg) = config.lock() {
+        update_config(&cfg.altsnap);
+    }
     if let Ok(mut cfg_guard) = GLOBAL_CONFIG.lock() {
         *cfg_guard = Some(config);
     }

@@ -797,6 +797,7 @@ fn main() {
                                 platform::set_hotkey(crate::config::parse_hotkey(&e.config().toggle_hotkey));
                                 osd::set_osd_enabled(e.config().osd_enabled);
                                 sound::set_sfx_enabled(e.config().keyboard.mechanical_sfx);
+                                altsnap::update_config(&e.config().altsnap);
                                 println!("[main] reloaded updated config from {}", watch_path.display());
                             }
                             Err(error) => eprintln!("[main] config reload deferred: {error}"),

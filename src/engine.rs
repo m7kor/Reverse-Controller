@@ -1389,9 +1389,24 @@ impl Engine {
                             fn ShowWindowAsync(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
                         }
                         GetCursorPos(&mut pt);
-                        let (_wa_x, wa_y, _wa_w, _wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+                        let (wa_x, wa_y, wa_w, wa_h) = crate::platform::work_area_at(pt.x, pt.y);
+                        let wa_right = wa_x + wa_w;
+                        let wa_bottom = wa_y + wa_h;
+
                         if pt.y <= wa_y + 4 {
                             ShowWindowAsync(state.hwnd as _, 3 /* SW_MAXIMIZE */);
+                        } else if pt.x <= wa_x + 6 && pt.y <= wa_y + 40 {
+                            crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::TopLeft);
+                        } else if pt.x >= wa_right - 6 && pt.y <= wa_y + 40 {
+                            crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::TopRight);
+                        } else if pt.x <= wa_x + 6 && pt.y >= wa_bottom - 40 {
+                            crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::BottomLeft);
+                        } else if pt.x >= wa_right - 6 && pt.y >= wa_bottom - 40 {
+                            crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::BottomRight);
+                        } else if pt.x <= wa_x + 6 {
+                            crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::LeftHalf);
+                        } else if pt.x >= wa_right - 6 {
+                            crate::altsnap::snap_window(state.hwnd as _, crate::altsnap::SnapQuadrant::RightHalf);
                         }
                     }
                 }
@@ -1417,23 +1432,58 @@ impl Engine {
                         fn IsZoomed(hWnd: *mut std::ffi::c_void) -> i32;
                         fn ShowWindow(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
                         fn GetWindowRect(hWnd: *mut std::ffi::c_void, lpRect: *mut crate::altsnap::RECT) -> i32;
+                        fn GetWindowPlacement(hWnd: *mut std::ffi::c_void, lpwndpl: *mut crate::altsnap::WINDOWPLACEMENT) -> i32;
+                        fn SetWindowPos(
+                            hWnd: *mut std::ffi::c_void,
+                            hWndInsertAfter: *mut std::ffi::c_void,
+                            X: i32,
+                            Y: i32,
+                            cx: i32,
+                            cy: i32,
+                            uFlags: u32,
+                        ) -> i32;
                     }
                     SetForegroundWindow(hwnd);
-                    if IsZoomed(hwnd) != 0 {
+                    let (win_x, win_y, win_w, win_h) = if IsZoomed(hwnd) != 0 {
+                        let mut wp: crate::altsnap::WINDOWPLACEMENT = std::mem::zeroed();
+                        wp.length = std::mem::size_of::<crate::altsnap::WINDOWPLACEMENT>() as u32;
+                        let (mut rw, mut rh) = (960, 600);
+                        if GetWindowPlacement(hwnd, &mut wp) != 0 {
+                            let nw = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+                            let nh = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+                            if nw > 200 && nh > 150 {
+                                rw = nw;
+                                rh = nh;
+                            }
+                        }
                         ShowWindow(hwnd, 9 /* SW_RESTORE */);
-                    }
-                    let mut rect = crate::altsnap::RECT::default();
-                    if GetWindowRect(hwnd, &mut rect) == 0 {
-                        return;
-                    }
-                    let w = rect.right - rect.left;
-                    let h = rect.bottom - rect.top;
+                        let pt = crate::win32::get_cursor_pos().unwrap_or((500, 300));
+                        let x = pt.0 - rw / 2;
+                        let y = (pt.1 - 20).max(0);
+                        SetWindowPos(
+                            hwnd,
+                            std::ptr::null_mut(),
+                            x,
+                            y,
+                            rw,
+                            rh,
+                            0x0004 /* SWP_NOZORDER */ | 0x0010 /* SWP_NOACTIVATE */ | 0x4000 /* SWP_ASYNCWINDOWPOS */,
+                        );
+                        (x, y, rw, rh)
+                    } else {
+                        let mut rect = crate::altsnap::RECT::default();
+                        if GetWindowRect(hwnd, &mut rect) == 0 {
+                            return;
+                        }
+                        (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+                    };
+
                     self.stick_drag_state = Some(StickDragState {
                         hwnd: hwnd as usize,
-                        pos_x: rect.left as f32,
-                        pos_y: rect.top as f32,
-                        width: w,
-                        height: h,
+                        pos_x: win_x as f32,
+                        pos_y: win_y as f32,
+                        width: win_w,
+                        height: win_h,
                     });
                 }
                 self.stick_drag_state.as_mut().unwrap()
@@ -1459,16 +1509,20 @@ impl Engine {
             let wa_right = wa_x + wa_w;
             let wa_bottom = wa_y + wa_h;
 
-            if (display_x - wa_x).abs() <= snap_dist {
-                display_x = wa_x;
-            } else if (display_x + state.width - wa_right).abs() <= snap_dist {
-                display_x = wa_right - state.width;
+            if state.width < wa_w - snap_dist * 3 {
+                if (display_x - wa_x).abs() <= snap_dist {
+                    display_x = wa_x;
+                } else if (display_x + state.width - wa_right).abs() <= snap_dist {
+                    display_x = wa_right - state.width;
+                }
             }
 
-            if (display_y - wa_y).abs() <= snap_dist {
-                display_y = wa_y;
-            } else if (display_y + state.height - wa_bottom).abs() <= snap_dist {
-                display_y = wa_bottom - state.height;
+            if state.height < wa_h - snap_dist * 3 {
+                if (display_y - wa_y).abs() <= snap_dist {
+                    display_y = wa_y;
+                } else if (display_y + state.height - wa_bottom).abs() <= snap_dist {
+                    display_y = wa_bottom - state.height;
+                }
             }
         }
 
