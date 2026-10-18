@@ -33,6 +33,7 @@ macro_rules! print {
 }
 
 mod actions;
+pub mod altsnap;
 pub mod amgp;
 #[cfg(feature = "gui")]
 pub mod arabic;
@@ -99,7 +100,10 @@ fn main() {
         #[link(name = "kernel32")]
         extern "system" {
             fn GetConsoleWindow() -> *mut std::ffi::c_void;
+            fn SetErrorMode(uMode: u32) -> u32;
         }
+        // SEM_FAILCRITICALERRORS (0x0001) | SEM_NOGPFAULTERRORBOX (0x0002) | SEM_NOOPENFILEERRORBOX (0x8000)
+        SetErrorMode(0x0001 | 0x0002 | 0x8000);
         #[link(name = "user32")]
         extern "system" {
             fn ShowWindow(hwnd: *mut std::ffi::c_void, cmd: i32) -> i32;
@@ -503,7 +507,7 @@ fn main() {
 
     // --- On-screen virtual keyboard overlay (gui feature) ---
     #[cfg(feature = "gui")]
-    let vk_flag: Option<Arc<AtomicBool>> = {
+    let (vk_flag, vk_join): (Option<Arc<AtomicBool>>, Option<std::thread::JoinHandle<()>>) = {
         let vk_nav = Arc::new(Mutex::new(crate::vknav::VkNav::default()));
         if let Ok(mut e) = engine.lock() {
             e.set_vk_nav(vk_nav.clone());
@@ -513,10 +517,13 @@ fn main() {
         if demo_kb {
             prefs.start_arabic = demo_kb_ar;
         }
-        Some(vkeyboard::spawn(vk_nav, prefs, demo_kb, demo_kb))
+        let (f, h) = vkeyboard::spawn(vk_nav, prefs, demo_kb, demo_kb, running.clone());
+        (Some(f), Some(h))
     };
     #[cfg(not(feature = "gui"))]
-    let vk_flag: Option<Arc<AtomicBool>> = None;
+    let (vk_flag, _vk_join): (Option<Arc<AtomicBool>>, Option<std::thread::JoinHandle<()>>) = (None, None);
+    #[cfg(feature = "gui")]
+    let mut text_watcher_join: Option<std::thread::JoinHandle<()>> = None;
     #[cfg(feature = "gui")]
     if let Some(f) = vk_flag.clone() {
         if let Ok(mut e) = engine.lock() {
@@ -530,7 +537,7 @@ fn main() {
             let f2 = f.clone();
             let run2 = running.clone();
             let eng2 = engine.clone();
-            std::thread::spawn(move || {
+            let join = std::thread::spawn(move || {
                 // Text-box detection uses accessibility (COM) queries here,
                 // away from the input thread.
                 platform::com_init_thread();
@@ -573,8 +580,20 @@ fn main() {
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
+                platform::com_uninit_thread();
             });
+            text_watcher_join = Some(join);
         }
+    }
+
+    // Spawn native AltSnap mouse window manipulation hook
+    {
+        let as_running = running.clone();
+        let cfg = {
+            let e = engine.lock().unwrap();
+            Arc::new(Mutex::new(e.config().clone()))
+        };
+        altsnap::start_mouse_hook(as_running, cfg);
     }
 
     // --- System-wide hotkey: toggle input remapping on/off ---
@@ -845,9 +864,9 @@ fn main() {
         while run_watch.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(100));
         }
-        platform::log_debug("[main] run_watch detected running=false, exiting");
-        // Give threads a moment to release keys / exit their loops.
-        std::thread::sleep(Duration::from_millis(1500));
+        platform::log_debug("[main] run_watch detected running=false, waiting for clean shutdown");
+        std::thread::sleep(Duration::from_millis(3500));
+        platform::log_debug("[main] run_watch safety net timeout expired, exiting");
         std::process::exit(0);
     });
 
@@ -856,10 +875,30 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     platform::log_debug("[main] running flag dropped, joining threads");
+    #[cfg(feature = "gui")]
+    vkeyboard::request_vkeyboard_repaint();
+    let hook_tid = altsnap::get_hook_thread_id();
+    if hook_tid != 0 {
+        unsafe {
+            #[link(name = "user32")]
+            extern "system" {
+                fn PostThreadMessageW(idThread: u32, msg: u32, wParam: usize, lParam: isize) -> i32;
+            }
+            PostThreadMessageW(hook_tid, 0x0012, 0, 0);
+        }
+    }
     predict::flush();
     let _ = tray_thread.join();
     let _ = engine_thread.join();
     let _ = status_thread.join();
+    #[cfg(feature = "gui")]
+    if let Some(th) = vk_join {
+        let _ = th.join();
+    }
+    #[cfg(feature = "gui")]
+    if let Some(th) = text_watcher_join {
+        let _ = th.join();
+    }
 
     // Write back only what changed at runtime (on/off, a profile chosen from
     // the controller, the keyboard position). Everything else stays exactly as

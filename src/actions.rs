@@ -104,6 +104,30 @@ pub enum Action {
     RadialMenu,
     /// Continuous window drag / move driven by stick (native AltSnap replacement).
     WindowDrag,
+    /// Continuous window resize driven by stick from closest quadrant (AltSnap).
+    WindowResize,
+    /// Toggle Always-on-Top (Pin window) for window under cursor (AltSnap).
+    WindowToggleTopmost,
+    /// Roll up / Shade window to titlebar or restore height (AltSnap).
+    WindowToggleRoll,
+    /// Adjust / Cycle window transparency (100% -> 80% -> 60% -> 40%) (AltSnap).
+    WindowCycleTransparency,
+    /// Lower window under cursor to bottom of desktop stack (AltSnap Send to Back).
+    WindowLower,
+    /// Close the window sitting directly under the cursor (AltSnap).
+    WindowCloseUnderCursor,
+    /// Toggle maximize or restore window under cursor (AltSnap).
+    WindowToggleMaximizeUnderCursor,
+    /// Minimize window under cursor (AltSnap).
+    WindowMinimizeUnderCursor,
+    /// Snap window under cursor to top-left quadrant.
+    WindowSnapTopLeft,
+    /// Snap window under cursor to top-right quadrant.
+    WindowSnapTopRight,
+    /// Snap window under cursor to bottom-left quadrant.
+    WindowSnapBottomLeft,
+    /// Snap window under cursor to bottom-right quadrant.
+    WindowSnapBottomRight,
     /// A feature that was removed (Steam) or is not ported (help overlay).
     /// Explicitly a no-op and documented.
     Excluded(String),
@@ -140,6 +164,18 @@ impl<'de> Deserialize<'de> for Action {
                 "PrevVirtualDesktop" => Ok(Action::PrevVirtualDesktop),
                 "RadialMenu" => Ok(Action::RadialMenu),
                 "WindowDrag" => Ok(Action::WindowDrag),
+                "WindowResize" => Ok(Action::WindowResize),
+                "WindowToggleTopmost" => Ok(Action::WindowToggleTopmost),
+                "WindowToggleRoll" => Ok(Action::WindowToggleRoll),
+                "WindowCycleTransparency" => Ok(Action::WindowCycleTransparency),
+                "WindowLower" => Ok(Action::WindowLower),
+                "WindowCloseUnderCursor" => Ok(Action::WindowCloseUnderCursor),
+                "WindowToggleMaximizeUnderCursor" => Ok(Action::WindowToggleMaximizeUnderCursor),
+                "WindowMinimizeUnderCursor" => Ok(Action::WindowMinimizeUnderCursor),
+                "WindowSnapTopLeft" => Ok(Action::WindowSnapTopLeft),
+                "WindowSnapTopRight" => Ok(Action::WindowSnapTopRight),
+                "WindowSnapBottomLeft" => Ok(Action::WindowSnapBottomLeft),
+                "WindowSnapBottomRight" => Ok(Action::WindowSnapBottomRight),
                 "NextProfile" => Ok(Action::NextProfile),
                 "PrevProfile" => Ok(Action::PrevProfile),
                 "CursorNextMonitor" => Ok(Action::CursorNextMonitor),

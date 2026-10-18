@@ -178,6 +178,52 @@ impl Default for ControllerSettings {
     }
 }
 
+/// Native AltSnap window management settings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AltSnapSettings {
+    /// Enable AltSnap desktop mouse window operations (Alt+Drag, Alt+Resize).
+    #[serde(default = "d_true")]
+    pub enabled: bool,
+    /// Physical keyboard modifier (Alt, Win, Ctrl, Shift).
+    #[serde(default = "d_altsnap_modifier")]
+    pub modifier: String,
+    /// Magnetic snap distance in pixels to monitor borders (0 = disabled).
+    #[serde(default = "d_snap_threshold")]
+    pub snap_distance: i32,
+    /// Snap to monitor edges during window move / resize.
+    #[serde(default = "d_true")]
+    pub snap_to_edges: bool,
+    /// Dragging window to top monitor edge maximizes it.
+    #[serde(default = "d_true")]
+    pub auto_maximize: bool,
+    /// Transparency step percentage for cycling (e.g. 20%).
+    #[serde(default = "d_transparency_step")]
+    pub transparency_step: u8,
+}
+
+fn d_altsnap_modifier() -> String {
+    "Alt".to_string()
+}
+fn d_snap_threshold() -> i32 {
+    15
+}
+fn d_transparency_step() -> u8 {
+    20
+}
+
+impl Default for AltSnapSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            modifier: d_altsnap_modifier(),
+            snap_distance: d_snap_threshold(),
+            snap_to_edges: true,
+            auto_maximize: true,
+            transparency_step: d_transparency_step(),
+        }
+    }
+}
+
 /// Persisted on-screen-keyboard preferences.
 ///
 /// Lives here rather than in `vkeyboard` because the whole point is that the
@@ -418,6 +464,9 @@ pub struct Config {
     pub mouse: MouseSettings,
     #[serde(default)]
     pub controller: ControllerSettings,
+    /// AltSnap native window management settings.
+    #[serde(default)]
+    pub altsnap: AltSnapSettings,
     /// Settings GUI language ("auto", "en", or "ar", default "auto").
     #[serde(default = "d_gui_language")]
     pub gui_language: String,
@@ -467,6 +516,7 @@ impl Default for Config {
             keyboard: KeyboardPrefs::default(),
             mouse: MouseSettings::default(),
             controller: ControllerSettings::default(),
+            altsnap: AltSnapSettings::default(),
             gui_language: d_gui_language(),
             fullscreen_exceptions: d_fullscreen_exceptions(),
             low_battery_warning: true,

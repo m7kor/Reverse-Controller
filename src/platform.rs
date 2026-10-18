@@ -1875,6 +1875,17 @@ pub fn com_init_thread() {
     }
 }
 
+/// Uninitialise COM on the calling thread.
+pub fn com_uninit_thread() {
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoUninitialize();
+    }
+    unsafe {
+        CoUninitialize();
+    }
+}
+
 /// Release modifier keys and mouse buttons that Windows reports as held.
 ///
 /// Used when the app starts and from the panic hook: an injected key-down

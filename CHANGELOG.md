@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [v1.3.0] — 2026-10-18
 
 ### 🚀 Highlights
+- **AltSnap native window management**: integrated full [AltSnap](https://github.com/RamonUnch/AltSnap) capabilities directly into the engine. Alt+Left Click anywhere moves windows with auto-maximize snapping; Alt+Right Click dynamically resizes windows based on cursor position relative to the 8 quadrant zones; Alt+Middle Click toggles maximize; Alt+Scroll cycles transparency. Magnetic edge snapping aligns windows to screen boundaries and taskbars. Toggles for Always-on-Top (pin), Roll Up / Shade, and Lower to back are supported via shortcuts and game controller mappings (analog stick `WindowResize` / `WindowDrag`). Fully customizable in Settings with dedicated English & Arabic UI.
 - **Installer built in**: running the downloaded `.exe` offers a per-user install (no administrator rights) to `%LOCALAPPDATA%\Programs\Reverse Controller`, with a Start-menu shortcut and an entry in Windows Installed apps; a newer download updates it; `--uninstall` removes it and keeps settings. Declining is remembered (portable use). The executable now carries an app icon and version information.
 - **Getting started tutorial**: opens on first launch; six steps (move, click, scroll, aim, type, quick menu) tick off as they are done on the controller.
 - **Smart pointer**: the pointer eases off over links and buttons (detected from the hand cursor, without accessibility queries that would slow browsers) so small targets are easy to stop on; a full push still sweeps past. Adjustable on the Pointer page.
@@ -26,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Multi-monitor keyboard**: opens on the monitor you are working on and keeps a moved keyboard on its own monitor.
 
 ### 🐛 Fixes
+- **0xc0000005 GPF exit crash fix**: resolved access violation popup on process termination by gracefully closing the WGPU/eframe graphics pipeline before exit, uninitializing STA COM threads cleanly, unhooking low-level hooks, and suppressing Windows GPF modal dialogs (`SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX`).
 - **Physical keyboard lockout fix**: replaced low-level `WH_KEYBOARD_LL` hook with native Win32 `RegisterHotKey`, completely preventing system-wide physical keyboard freezes and latency.
 - **Overlay focus stealing fix**: enforced `with_active(false)` and `WS_EX_NOACTIVATE` on virtual keyboard creation so off-screen overlays never steal input focus from active desktop apps.
 - **Window title lookup & controller click bounds**: fixed overlay title mismatch (`CCVKbd` vs `Controller Companion Keyboard`) and bounded controller click tracking so physical mouse clicks properly dismiss the overlay.

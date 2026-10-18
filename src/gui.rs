@@ -261,6 +261,19 @@ fn action_catalog() -> Vec<CatalogEntry> {
         (G::Windows, "Minimize Window (Win+Down)", "تصغير النافذة (Win+Down)", Action::MinimizeWindow),
         (G::Windows, "Next Desktop (Win+Ctrl+Right)", "سطح المكتب التالي (Win+Ctrl+Right)", Action::NextVirtualDesktop),
         (G::Windows, "Previous Desktop (Win+Ctrl+Left)", "سطح المكتب السابق (Win+Ctrl+Left)", Action::PrevVirtualDesktop),
+        (G::Windows, "AltSnap: Drag Window", "سحب وتحريك النافذة (AltSnap)", Action::WindowDrag),
+        (G::Windows, "AltSnap: Resize Window", "تغيير حجم النافذة (AltSnap)", Action::WindowResize),
+        (G::Windows, "AltSnap: Toggle Always-on-Top", "تثبيت النافذة في المقدمة دائماً", Action::WindowToggleTopmost),
+        (G::Windows, "AltSnap: Roll Up / Shade", "طي النافذة لشريط العنوان", Action::WindowToggleRoll),
+        (G::Windows, "AltSnap: Cycle Transparency", "تبديل شفافية النافذة", Action::WindowCycleTransparency),
+        (G::Windows, "AltSnap: Send to Back", "إرسال النافذة للخلف", Action::WindowLower),
+        (G::Windows, "AltSnap: Close Under Cursor", "إغلاق النافذة تحت المؤشر", Action::WindowCloseUnderCursor),
+        (G::Windows, "AltSnap: Toggle Maximize", "تكبير/استعادة النافذة", Action::WindowToggleMaximizeUnderCursor),
+        (G::Windows, "AltSnap: Minimize Under Cursor", "تصغير النافذة تحت المؤشر", Action::WindowMinimizeUnderCursor),
+        (G::Windows, "Snap Top-Left", "محاذاة لأعلى اليسار", Action::WindowSnapTopLeft),
+        (G::Windows, "Snap Top-Right", "محاذاة لأعلى اليمين", Action::WindowSnapTopRight),
+        (G::Windows, "Snap Bottom-Left", "محاذاة لأسفل اليسار", Action::WindowSnapBottomLeft),
+        (G::Windows, "Snap Bottom-Right", "محاذاة لأسفل اليمين", Action::WindowSnapBottomRight),
         (G::System, "Windows Start Menu", "قائمة ابدأ (Windows)", key(K::LWin)),
         (G::System, "Search (Win+S)", "بحث ويندوز (Win+S)", combo(&[K::LWin, K::S])),
         (G::System, "Run (Win+R)", "تشغيل (Win+R)", combo(&[K::LWin, K::R])),
@@ -332,7 +345,8 @@ fn format_action(action: &Action, lang: GuiLang) -> String {
         Action::MouseMove { inverted: true } => t("Mouse Pointer (Inverted Y)", "تحريك المؤشر (محور Y معكوس)", lang),
         Action::MouseScroll { flip_y: false } => t("Scroll Wheel", "التمرير بالبكرة", lang),
         Action::MouseScroll { flip_y: true } => t("Scroll Wheel (Inverted Y)", "التمرير معكوس عمودياً", lang),
-        Action::WindowDrag => t("Window Drag & Move", "تحريك وسحب النوافذ", lang),
+        Action::WindowDrag => t("Window Drag & Move (AltSnap)", "تحريك وسحب النوافذ (AltSnap)", lang),
+        Action::WindowResize => t("Window Resize (AltSnap)", "تغيير حجم النوافذ (AltSnap)", lang),
         Action::Modifier(Modifier::Back) => t("Hold Modifier (Back)", "زر الوظائف الإضافية (Back)", lang),
         Action::Key { key, .. } => format!("{}: {}", t("Key", "زر", lang), key_name(*key)),
         Action::Combo(keys) => keys.iter().map(|k| key_name(*k)).collect::<Vec<_>>().join("+"),
@@ -348,7 +362,8 @@ fn stick_actions(lang: GuiLang) -> Vec<(String, Action)> {
     vec![
         (t("Mouse Pointer", "تحريك مؤشر الفأرة", lang), Action::MouseMove { inverted: false }),
         (t("Scroll Wheel", "التمرير بالبكرة", lang), Action::MouseScroll { flip_y: false }),
-        (t("Window Drag & Move", "تحريك وسحب النوافذ", lang), Action::WindowDrag),
+        (t("Window Drag & Move (AltSnap)", "تحريك وسحب النوافذ (AltSnap)", lang), Action::WindowDrag),
+        (t("Window Resize (AltSnap)", "تغيير حجم النوافذ (AltSnap)", lang), Action::WindowResize),
         (t("Disabled", "معطل", lang), Action::DoNothing),
     ]
 }
@@ -553,6 +568,7 @@ enum SettingsPage {
     Home,
     Tutorial,
     Pointer,
+    AltSnap,
     Controller,
     Keyboard,
     Buttons,
@@ -562,10 +578,11 @@ enum SettingsPage {
 }
 
 impl SettingsPage {
-    const ALL: [SettingsPage; 9] = [
+    const ALL: [SettingsPage; 10] = [
         SettingsPage::Home,
         SettingsPage::Tutorial,
         SettingsPage::Pointer,
+        SettingsPage::AltSnap,
         SettingsPage::Controller,
         SettingsPage::Keyboard,
         SettingsPage::Buttons,
@@ -579,6 +596,7 @@ impl SettingsPage {
             SettingsPage::Home => "🏠",
             SettingsPage::Tutorial => "🎓",
             SettingsPage::Pointer => "🖱",
+            SettingsPage::AltSnap => "🗖",
             SettingsPage::Controller => "🎮",
             SettingsPage::Keyboard => "⌨",
             SettingsPage::Buttons => "🔘",
@@ -592,6 +610,7 @@ impl SettingsPage {
         let (en, ar_str) = match self {
             SettingsPage::Home => ("Home", "الرئيسية"),
             SettingsPage::Pointer => ("Pointer", "المؤشر"),
+            SettingsPage::AltSnap => ("AltSnap", "إدارة النوافذ (AltSnap)"),
             SettingsPage::Controller => ("Controller", "يد التحكم"),
             SettingsPage::Keyboard => ("Keyboard", "الكيبورد"),
             SettingsPage::Buttons => ("Buttons", "الأزرار"),
@@ -607,6 +626,7 @@ impl SettingsPage {
         let (en, ar_str) = match self {
             SettingsPage::Home => ("Status and your controller at a glance", "الحالة ويد التحكم بنظرة سريعة"),
             SettingsPage::Pointer => ("Speed, precision and scrolling", "السرعة والدقة والتمرير"),
+            SettingsPage::AltSnap => ("Window dragging, edge snapping, resizing and controls", "سحب النوافذ ومحاذاة الحواف وتغيير الحجم والتحكم"),
             SettingsPage::Controller => ("Live input, calibration, dead zones and vibration", "الإدخال المباشر والمعايرة ومناطق الخمول والاهتزاز"),
             SettingsPage::Keyboard => ("On-screen keyboard placement and typing", "مكان الكيبورد على الشاشة والكتابة"),
             SettingsPage::Buttons => ("What every button and stick does", "وظيفة كل زر وعصا"),
@@ -1443,6 +1463,78 @@ impl SettingsApp {
         });
     }
 
+    fn page_altsnap(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let s = &mut self.working.altsnap;
+
+        card(ui, lang, &t("AltSnap Window Management", "إدارة النوافذ (AltSnap)", lang),
+            &t("Move, resize, snap and manage windows smoothly via physical Mouse or Controller",
+               "تحريك وسحب وتغيير حجم النوافذ والمحاذاة الذكية عبر الماوس أو يد التحكم", lang), |ui| {
+            row(ui, lang, &t("Enable AltSnap with Mouse", "تفعيل AltSnap للماوس", lang),
+                &t("Hold modifier key to drag and resize windows from anywhere",
+                   "اضغط زر التعديل للسحب وتغيير الحجم من أي مكان في النافذة", lang), |ui| {
+                toggle(ui, &mut s.enabled);
+            });
+            if s.enabled {
+                row(ui, lang, &t("Activation Modifier", "زر التفعيل بالماوس", lang),
+                    &t("Physical keyboard key held while clicking or dragging", "الزر المضغوط على لوحة المفاتيح أثناء النقر أو السحب", lang), |ui| {
+                    egui::ComboBox::from_id_source("altsnap_mod_select")
+                        .selected_text(&s.modifier)
+                        .show_ui(ui, |ui| {
+                            for m in ["Alt", "Win", "Ctrl", "Shift"] {
+                                if ui.selectable_label(s.modifier == m, m).clicked() {
+                                    s.modifier = m.to_string();
+                                }
+                            }
+                        });
+                });
+            }
+        });
+
+        card(ui, lang, &t("Magnetic Edge Snapping", "المحاذاة المغناطيسية للحواف", lang),
+            &t("Snap windows cleanly to monitor boundaries during move or resize", "محاذاة النوافذ بسلاسة مع حواف الشاشة أثناء السحب أو تغيير الحجم", lang), |ui| {
+            row(ui, lang, &t("Snap to Screen Edges", "محاذاة لحواف الشاشة", lang),
+                &t("Windows snap to monitor borders (Aero Snap)", "تلتصق النوافذ بحواف الشاشة بدقة", lang), |ui| {
+                toggle(ui, &mut s.snap_to_edges);
+            });
+            if s.snap_to_edges {
+                row(ui, lang, &t("Snapping Distance", "مسافة المحاذاة", lang),
+                    &t("Distance in pixels before edge snaps (0 = off)", "المسافة بالبكسل للالتصاق بالحافة (0 = معطل)", lang), |ui| {
+                    ui.add(egui::Slider::new(&mut s.snap_distance, 0..=50).suffix(" px"));
+                });
+                row(ui, lang, &t("Maximize on Top Drag", "تكبير عند السحب للأعلى", lang),
+                    &t("Dragging window to the top of the monitor maximizes it", "سحب النافذة لأعلى الشاشة يكبرها لملء الشاشة", lang), |ui| {
+                    toggle(ui, &mut s.auto_maximize);
+                });
+            }
+        });
+
+        card(ui, lang, &t("Transparency", "الشفافية", lang), "", |ui| {
+            row(ui, lang, &t("Transparency Step", "خطوة الشفافية", lang),
+                &t("Percentage delta when cycling window opacity (e.g. 20%)", "نسبة تغيير شفافية النافذة في كل تبديل", lang), |ui| {
+                ui.add(egui::Slider::new(&mut s.transparency_step, 5..=50).suffix("%"));
+            });
+        });
+
+        card(ui, lang, &t("Controller & Mouse Shortcuts Reference", "دليل اختصارات AltSnap لليد والماوس", lang), "", |ui| {
+            ui.label(t(
+                "• Alt + Left Click Drag: Move window under cursor from anywhere\n\
+                 • Alt + Right Click Drag: Resize window from nearest corner/edge\n\
+                 • Alt + Middle Click: Toggle Maximize / Restore\n\
+                 • Alt + Mouse Wheel: Adjust Window Transparency\n\
+                 • Controller Stick: Bind to 'Window Drag & Move' or 'Window Resize'\n\
+                 • Controller Buttons: Bind to Always-on-Top, Roll Up, Transparency, Snap",
+                "• زر Alt + سحب بالنقر الأيسر: تحريك النافذة من أي مكان\n\
+                 • زر Alt + سحب بالنقر الأيمن: تغيير حجم النافذة من الزاوية الأقرب\n\
+                 • زر Alt + النقر الأوسط: تكبير أو استعادة النافذة\n\
+                 • زر Alt + عجلة الماوس: تعديل شفافية النافذة\n\
+                 • عصا التحكم: يمكن تعيينها لـ 'سحب وتحريك النوافذ' أو 'تغيير الحجم'\n\
+                 • أزرار اليد: التثبيت في المقدمة، طي النافذة، الشفافية، المحاذاة",
+                lang
+            ));
+        });
+    }
+
     fn page_controller(&mut self, ui: &mut egui::Ui, live: &Live) {
         let lang = self.lang;
         card(ui, lang, &t("Supported controllers", "أيادي التحكم المدعومة", lang), &t("No extra drivers needed", "بدون تعريفات إضافية", lang), |ui| {
@@ -2203,6 +2295,7 @@ impl eframe::App for SettingsApp {
                         SettingsPage::Home => self.page_home(ui, &live),
                         SettingsPage::Tutorial => self.page_tutorial(ui, &live),
                         SettingsPage::Pointer => self.page_pointer(ui),
+                        SettingsPage::AltSnap => self.page_altsnap(ui),
                         SettingsPage::Controller => self.page_controller(ui, &live),
                         SettingsPage::Keyboard => self.page_keyboard(ui),
                         SettingsPage::Buttons => self.page_buttons(ui),

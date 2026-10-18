@@ -244,6 +244,7 @@ pub struct VKbdApp {
     reposition_ry: f32,
     last_mouse_down_pos: Option<egui::Pos2>,
     grid_nav_active: bool,
+    running: Arc<AtomicBool>,
 }
 
 impl VKbdApp {
@@ -253,6 +254,7 @@ impl VKbdApp {
         lang: Lang,
         demo: bool,
         prefs: crate::config::KeyboardPrefs,
+        running: Arc<AtomicBool>,
     ) -> Self {
         let (screen_w, screen_h) = platform::screen_size();
         let rows = build_layout(lang, Layer::Abc);
@@ -313,6 +315,7 @@ impl VKbdApp {
             reposition_ry: 0.0,
             last_mouse_down_pos: None,
             grid_nav_active: false,
+            running,
         }
     }
 
@@ -1122,6 +1125,10 @@ impl eframe::App for VKbdApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.running.load(Ordering::Relaxed) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         self.sync_typing_target(platform::foreground_hwnd());
         let pointer_delta = ctx.input(|i| i.pointer.delta().length());
         let pointer_down = ctx.input(|i| i.pointer.primary_pressed() || i.pointer.primary_down() || i.pointer.any_pressed() || i.pointer.any_down());
@@ -1605,7 +1612,8 @@ pub fn spawn(
     prefs: crate::config::KeyboardPrefs,
     start_visible: bool,
     demo: bool,
-) -> Arc<AtomicBool> {
+    running: Arc<AtomicBool>,
+) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
     let flag = Arc::new(AtomicBool::new(start_visible));
     let arabic = prefs.start_arabic;
     if let Ok(mut g) = CURRENT_PREFS.lock() {
@@ -1614,8 +1622,9 @@ pub fn spawn(
     crate::platform::log_debug(&format!(
         "[vkeyboard] spawn() called: start_visible={start_visible} demo={demo}"
     ));
-    {
+    let handle = {
         let flag = flag.clone();
+        let run_clone = running.clone();
         std::thread::spawn(move || {
             crate::platform::attach_to_interactive_desktop();
             crate::platform::log_debug("[vkeyboard] thread started, configuring eframe...");
@@ -1653,6 +1662,7 @@ pub fn spawn(
                         lang_of(arabic),
                         demo,
                         prefs.clone(),
+                        run_clone,
                     ))
                 }),
             );
@@ -1660,9 +1670,9 @@ pub fn spawn(
             if let Err(e) = res {
                 eprintln!("[vkeyboard] eframe error: {e}");
             }
-        });
-    }
-    flag
+        })
+    };
+    (flag, handle)
 }
 
 fn lang_of(arabic: bool) -> Lang {
@@ -1737,7 +1747,14 @@ mod tests {
 
     #[test]
     fn switching_target_discards_old_predictions_and_preview() {
-        let mut app = VKbdApp::new(Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(VkNav::default())), Lang::En, false, crate::config::KeyboardPrefs::default());
+        let mut app = VKbdApp::new(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(VkNav::default())),
+            Lang::En,
+            false,
+            crate::config::KeyboardPrefs::default(),
+            Arc::new(AtomicBool::new(true)),
+        );
         app.typing_target = 10;
         app.typed_word = "hel".into();
         app.typed_buffer = "hel".into();
@@ -1922,6 +1939,7 @@ mod tests {
             Lang::En,
             true,
             crate::config::KeyboardPrefs::default(),
+            Arc::new(AtomicBool::new(true)),
         );
         assert_eq!(
             app.get_toolbar_actions(),
@@ -2156,6 +2174,7 @@ mod tests {
             Lang::En,
             false,
             crate::config::KeyboardPrefs::default(),
+            Arc::new(AtomicBool::new(true)),
         );
         let acts = app.get_toolbar_actions();
         assert!(acts.contains(&Act::Copy));
@@ -2171,6 +2190,7 @@ mod tests {
             Lang::En,
             false,
             crate::config::KeyboardPrefs::default(),
+            Arc::new(AtomicBool::new(true)),
         );
         app.typed_word = "hel".to_string();
         app.accept_top_prediction();

@@ -474,6 +474,7 @@ pub struct Engine {
     nav_mouse_down: bool,
     last_cursor_pos: Option<(i32, i32)>,
     was_fullscreen_paused: bool,
+    stick_resize_quadrant: Option<crate::altsnap::ResizeQuadrant>,
 }
 
 static PENDING_RUMBLE: Mutex<Option<(u16, u16, f64)>> = Mutex::new(None);
@@ -548,6 +549,7 @@ impl Engine {
             nav_mouse_down: false,
             last_cursor_pos: None,
             was_fullscreen_paused: false,
+            stick_resize_quadrant: None,
         };
         eng.generic.set_overrides(pad_overrides(&eng.config));
         eng.rebuild_bindings();
@@ -1343,6 +1345,9 @@ impl Engine {
             Action::WindowDrag => {
                 self.window_drag(axes, dt);
             }
+            Action::WindowResize => {
+                self.window_resize(axes, dt);
+            }
             _ => {}
         }
     }
@@ -1354,10 +1359,61 @@ impl Engine {
         if mag <= self.config.controller.right_stick_dead_zone as f32 || mag == 0.0 {
             return;
         }
-        let speed = 800.0f32; // smooth window move speed in pixels/s
+        let speed = 900.0f32; // smooth window move speed in pixels/s
         let dx = (x / 32767.0) * speed * dt as f32;
         let dy = (-y / 32767.0) * speed * dt as f32; // Invert stick Y for screen Y
-        crate::platform::move_window_at_cursor(dx.round() as i32, dy.round() as i32);
+        if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+            crate::altsnap::move_window_relative(
+                hwnd,
+                dx.round() as i32,
+                dy.round() as i32,
+                self.config.altsnap.snap_distance,
+                self.config.altsnap.snap_to_edges,
+                self.config.altsnap.auto_maximize,
+            );
+        }
+    }
+
+    /// Continuous window resize driven by stick from closest quadrant (AltSnap).
+    fn window_resize(&mut self, axes: (f32, f32), dt: f64) {
+        let (x, y) = axes;
+        let mag = (x * x + y * y).sqrt();
+        if mag <= self.config.controller.right_stick_dead_zone as f32 || mag == 0.0 {
+            self.stick_resize_quadrant = None;
+            return;
+        }
+        let speed = 900.0f32;
+        let dx = (x / 32767.0) * speed * dt as f32;
+        let dy = (-y / 32767.0) * speed * dt as f32;
+        if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+            let quad = match self.stick_resize_quadrant {
+                Some(q) => q,
+                None => {
+                    let mut pt = crate::altsnap::POINT::default();
+                    let mut rect = crate::altsnap::RECT::default();
+                    unsafe {
+                        #[link(name = "user32")]
+                        extern "system" {
+                            fn GetCursorPos(lpPoint: *mut crate::altsnap::POINT) -> i32;
+                            fn GetWindowRect(hWnd: *mut std::ffi::c_void, lpRect: *mut crate::altsnap::RECT) -> i32;
+                        }
+                        GetCursorPos(&mut pt);
+                        GetWindowRect(hwnd, &mut rect);
+                    }
+                    let q = crate::altsnap::detect_resize_quadrant(&rect, pt.x, pt.y);
+                    self.stick_resize_quadrant = Some(q);
+                    q
+                }
+            };
+            crate::altsnap::resize_window_relative(
+                hwnd,
+                dx.round() as i32,
+                dy.round() as i32,
+                quad,
+                self.config.altsnap.snap_distance,
+                self.config.altsnap.snap_to_edges,
+            );
+        }
     }
 
     /// `axes` are raw XInput units (see `shape_stick`). Movement is computed as
@@ -2066,6 +2122,61 @@ fn on_pressed(
             crate::vkeyboard::toggle_keyboard(vk.cloned());
             #[cfg(not(feature = "gui"))]
             let _ = vk;
+        }
+        Action::WindowToggleTopmost => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::toggle_topmost(hwnd);
+            }
+        }
+        Action::WindowToggleRoll => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::toggle_roll_up(hwnd);
+            }
+        }
+        Action::WindowCycleTransparency => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::cycle_transparency(hwnd, 20);
+            }
+        }
+        Action::WindowLower => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::lower_window(hwnd);
+            }
+        }
+        Action::WindowCloseUnderCursor => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::close_window(hwnd);
+            }
+        }
+        Action::WindowToggleMaximizeUnderCursor => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::toggle_maximize(hwnd);
+            }
+        }
+        Action::WindowMinimizeUnderCursor => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::minimize_window(hwnd);
+            }
+        }
+        Action::WindowSnapTopLeft => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::snap_window(hwnd, crate::altsnap::SnapQuadrant::TopLeft);
+            }
+        }
+        Action::WindowSnapTopRight => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::snap_window(hwnd, crate::altsnap::SnapQuadrant::TopRight);
+            }
+        }
+        Action::WindowSnapBottomLeft => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::snap_window(hwnd, crate::altsnap::SnapQuadrant::BottomLeft);
+            }
+        }
+        Action::WindowSnapBottomRight => {
+            if let Some(hwnd) = crate::altsnap::get_window_under_cursor() {
+                crate::altsnap::snap_window(hwnd, crate::altsnap::SnapQuadrant::BottomRight);
+            }
         }
         Action::RadialMenu => {
             #[cfg(feature = "gui")]
