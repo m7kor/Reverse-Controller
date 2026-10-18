@@ -837,6 +837,21 @@ pub fn place_window(title: &str, x: i32, y: i32, w: i32, h: i32) -> bool {
         if hwnd.is_null() {
             return false;
         }
+        let is_shell = is_system_shell_foreground();
+        if is_shell {
+            let fg = GetForegroundWindow();
+            if !fg.is_null() && fg != hwnd {
+                let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);
+                if cur_parent != fg as isize {
+                    SetWindowLongPtrW(hwnd, -8, fg as isize);
+                }
+            }
+        } else {
+            let cur_parent = GetWindowLongPtrW(hwnd, -8);
+            if cur_parent != 0 {
+                SetWindowLongPtrW(hwnd, -8, 0);
+            }
+        }
         SetWindowPos(
             hwnd,
             (-1isize) as HWND,
@@ -845,6 +860,15 @@ pub fn place_window(title: &str, x: i32, y: i32, w: i32, h: i32) -> bool {
             w,
             h,
             SWP_NOACTIVATE | async_flag(hwnd),
+        );
+        SetWindowPos(
+            hwnd,
+            0 as HWND,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd),
         );
         true
     }
@@ -861,7 +885,8 @@ pub fn move_window(title: &str, x: i32, y: i32) -> bool {
         if hwnd.is_null() {
             return false;
         }
-        let (insert_after, flags) = if x < -2000 || y < -2000 {
+        let is_hidden = x < -2000 || y < -2000;
+        let (insert_after, flags) = if is_hidden {
             (std::ptr::null_mut(), SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | async_flag(hwnd))
         } else {
             ((-1isize) as HWND, SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd))
@@ -875,11 +900,22 @@ pub fn move_window(title: &str, x: i32, y: i32) -> bool {
             0,
             flags,
         );
+        if !is_hidden {
+            SetWindowPos(
+                hwnd,
+                0 as HWND,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd),
+            );
+        }
         true
     }
 }
 
-/// Reassert HWND_TOPMOST so the overlay stays in front of system flyouts
+/// Reassert HWND_TOPMOST and HWND_TOP so the overlay stays in front of system flyouts
 /// (such as Windows 11 SearchHost.exe or StartMenuExperienceHost.exe)
 /// without stealing focus.
 pub fn bring_to_top(title: &str) -> bool {
@@ -888,9 +924,33 @@ pub fn bring_to_top(title: &str) -> bool {
         if hwnd.is_null() {
             return false;
         }
+        let is_shell = is_system_shell_foreground();
+        if is_shell {
+            let fg = GetForegroundWindow();
+            if !fg.is_null() && fg != hwnd {
+                let cur_parent = GetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */);
+                if cur_parent != fg as isize {
+                    SetWindowLongPtrW(hwnd, -8, fg as isize);
+                }
+            }
+        } else {
+            let cur_parent = GetWindowLongPtrW(hwnd, -8);
+            if cur_parent != 0 {
+                SetWindowLongPtrW(hwnd, -8, 0);
+            }
+        }
         SetWindowPos(
             hwnd,
             (-1isize) as HWND,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | async_flag(hwnd),
+        );
+        SetWindowPos(
+            hwnd,
+            0 as HWND,
             0,
             0,
             0,

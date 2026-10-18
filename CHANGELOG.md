@@ -5,6 +5,26 @@ All notable changes to the **Reverse Controller** (Controller Companion — Nati
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [v1.3.1] — 2026-10-18
+
+### 🚀 Highlights & Bug Fixes
+- **AltSnap Polish & Stutter-Free Window Dragging**:
+  - Eliminated mouse cursor freezes, lag, and jitter during window movement.
+  - Fixed axis-locking bug where windows could become locked vertically and only move horizontally.
+  - Fixed unmaximize edge trapping: restoring maximized windows by dragging now includes an automatic grace margin, preventing immediate re-snapping or accidental re-maximizing.
+  - Minimized Win32 GDI calls by caching monitor work areas, updating only when crossing monitor bounds.
+  - Decoupled X and Y movement axes for zero-latency, buttery-smooth window movement.
+  - Enhanced controller stick window drag to track true window bounds and pin cursor to the titlebar.
+- **Start Menu & System Shell Overlay**:
+  - The virtual keyboard now renders directly in front of (on top of) the Windows 11 Start Menu and system flyouts (`StartMenuExperienceHost.exe` & `SearchHost.exe`) at its natural position without dodging away or getting buried underneath.
+  - Automatically manages Win32 Z-order hierarchy (`HWND_TOPMOST` and `HWND_TOP`) and shell foreground ownership so keystrokes type seamlessly into Start and Search.
+- **Virtual Keyboard & Radial Menu Refinements**:
+  - Eliminated unwanted yellow focus boxes/borders appearing on keys when opening keyboard or clicking from the Radial Menu (focus borders only activate on intentional D-pad arrow grid navigation).
+  - Fixed Radial Menu 430x430 clipping when transitioning to the full virtual keyboard.
+  - Radial Menu volume up/down slices stay open for smooth, continuous adjustment.
+  - Cleaned up clipboard paste actions to avoid duplicated paste events.
+
+---
 
 ## [v1.3.0] — 2026-10-18
 
