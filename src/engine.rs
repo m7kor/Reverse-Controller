@@ -1858,8 +1858,6 @@ impl Engine {
         const MOUSE_STICK_DEADZONE: i32 = 4000;
         let mouse_moving = (gp.sThumbLX as i32).abs() > MOUSE_STICK_DEADZONE
             || (gp.sThumbLY as i32).abs() > MOUSE_STICK_DEADZONE
-            || (gp.sThumbRX as i32).abs() > MOUSE_STICK_DEADZONE
-            || (gp.sThumbRY as i32).abs() > MOUSE_STICK_DEADZONE
             || physical_mouse_moved;
 
         if split || radial || dpad_moving {
@@ -1909,21 +1907,23 @@ impl Engine {
             self.nav_cooldown -= dt;
         }
 
-        // Right stick discrete movement (for Dual-Stick Split Keyboard mode).
+        // Right stick discrete movement (for Dual-Stick Split Keyboard mode only).
         let mut rdx: i32 = 0;
         let mut rdy: i32 = 0;
-        if gp.sThumbRX > STICK_TH {
-            rdx = 1;
-        } else if gp.sThumbRX < -STICK_TH {
-            rdx = -1;
-        }
-        if gp.sThumbRY > STICK_TH {
-            rdy = -1;
-        } else if gp.sThumbRY < -STICK_TH {
-            rdy = 1;
+        if split {
+            if gp.sThumbRX > STICK_TH {
+                rdx = 1;
+            } else if gp.sThumbRX < -STICK_TH {
+                rdx = -1;
+            }
+            if gp.sThumbRY > STICK_TH {
+                rdy = -1;
+            } else if gp.sThumbRY < -STICK_TH {
+                rdy = 1;
+            }
         }
 
-        let moving_r = rdx != 0 || rdy != 0;
+        let moving_r = split && (rdx != 0 || rdy != 0);
         let step_r = if moving_r {
             if !self.nav_was_moving_right {
                 self.nav_was_moving_right = true;
@@ -2747,6 +2747,29 @@ mod tests {
         let fed = nav.lock().unwrap().drain();
         assert_eq!((fed.layer, fed.shift), (1, 1));
         assert_eq!((fed.select_left, fed.select_right), (0, 0));
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn normal_keyboard_right_stick_does_not_generate_grid_steps() {
+        let (mut engine, nav) = keyboard_engine(false);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD::default()));
+        engine.update(0.0, 0.008);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD { sThumbRX: 30000, sThumbRY: 30000, ..Default::default() }));
+        engine.update(0.008, 0.008);
+        let fed = nav.lock().unwrap().drain();
+        assert_eq!((fed.rx, fed.ry), (0, 0), "Right stick must not generate discrete grid steps in normal mode");
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn split_keyboard_right_stick_generates_grid_steps() {
+        let (mut engine, nav) = keyboard_engine(true);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD::default()));
+        engine.update(0.0, 0.008);
+        engine.set_injected_gamepad(Some(w32::XINPUT_GAMEPAD { sThumbRX: 30000, ..Default::default() }));
+        engine.update(0.008, 0.008);
+        assert_eq!(nav.lock().unwrap().drain().rx, 1, "Right stick moves right cursor in split mode");
     }
 
     #[test]

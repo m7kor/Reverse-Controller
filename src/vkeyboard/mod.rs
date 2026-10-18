@@ -965,7 +965,7 @@ impl VKbdApp {
             Ok(mut g) => g.drain(),
             Err(_) => return false,
         };
-        if n.dx != 0 || n.dy != 0 || n.jump_y != 0 || n.rx != 0 || n.ry != 0 {
+        if n.dx != 0 || n.dy != 0 || n.jump_y != 0 || (self.split_mode && (n.rx != 0 || n.ry != 0)) {
             self.grid_nav_active = true;
         } else if !n.grid_nav_active {
             self.grid_nav_active = false;
